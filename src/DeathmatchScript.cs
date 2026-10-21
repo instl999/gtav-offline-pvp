@@ -1,0 +1,1123 @@
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using GTA;
+using GTA.Math;
+using GTA.Native;
+using Color = System.Drawing.Color;
+using KeyEventArgs = System.Windows.Forms.KeyEventArgs;
+using Keys = System.Windows.Forms.Keys;
+
+namespace OfflinePvP
+{
+    /// <summary>
+    /// Single-player "GTA Online style" deathmatch: Free-for-all or Team Deathmatch against AI bots,
+    /// with live-tunable bot count, difficulty and accuracy (F7 menu, works mid-match).
+    /// </summary>
+    public sealed class DeathmatchScript : Script
+    {
+        enum State { Idle, Running, Ended }
+
+        static readonly string[] FfaModels = {
+            "a_m_y_hipster_01", "a_m_y_hipster_02", "a_m_y_business_01", "a_m_y_beach_01", "a_m_y_skater_01",
+            "a_m_y_stbla_01", "a_m_y_stwhi_01", "a_m_y_downtown_01", "a_m_y_vinewood_01", "a_m_y_ktown_01",
+            "a_f_y_hipster_01", "a_f_y_tourist_01", "a_f_y_bevhills_01", "g_m_y_ballaeast_01", "g_m_y_famca_01",
+            "g_m_y_mexgoon_01", "g_m_y_lost_01", "g_m_y_korean_01", "g_m_y_salvagoon_01", "g_m_m_armgoon_01",
+            "s_m_y_blackops_01", "s_m_m_highsec_01" };
+        static readonly string[] AllyModels = { "s_m_y_blackops_01", "s_m_y_blackops_02", "s_m_y_blackops_03" };
+        static readonly string[] EnemyModels = { "g_m_y_lost_01", "g_m_y_lost_02", "g_m_y_lost_03", "g_m_y_mexgoon_01", "g_m_y_mexgoon_02" };
+
+        static readonly Color Blue = Color.FromArgb(255, 93, 182, 229);
+        static readonly Color Red = Color.FromArgb(255, 224, 50, 50);
+        static readonly Color Gold = Color.FromArgb(255, 240, 200, 80);
+
+        const int FfaGroupCount = 8;
+        const int SpawnProtectMs = 1500;
+        const int OutOfBoundsMs = 10000;
+        const int ResultsMs = 12000;
+
+        readonly Random rng = new Random();
+        readonly DmConfig cfg = new DmConfig();
+        readonly SimpleMenu menu = new SimpleMenu("Offline PvP");
+        readonly BigMessage shard = new BigMessage();
+        readonly List<Combatant> combatants = new List<Combatant>();
+        readonly List<KeyValuePair<Ped, int>> corpses = new List<KeyValuePair<Ped, int>>();
+        readonly List<Vector3> spawns = new List<Vector3>();
+        readonly List<FeedEntry> feed = new List<FeedEntry>();
+
+        State state = State.Idle;
+        bool startRequested, endRequested;
+        int configVersion;
+        Combatant player;
+        Vector3 center, origin;
+        float radius;
+        Blip areaBlip;
+        int matchStart, endedAt, outOfBoundsSince, nextRosterCheck, nextTeamId;
+        string resultLine;
+        RelationshipGroup allyGroup, enemyGroup;
+        RelationshipGroup[] ffaGroups;
+
+        sealed class FeedEntry
+        {
+            public string Text;
+            public int Time;
+        }
+
+        public DeathmatchScript()
+        {
+            cfg.Load(Settings);
+            BuildMenu();
+            Tick += OnTick;
+            KeyDown += OnKeyDown;
+            Aborted += OnAborted;
+            Interval = 0;
+        }
+
+        // ------------------------------------------------------------------ menu
+
+        void BuildMenu()
+        {
+            Func<bool> idle = delegate { return state == State.Idle; };
+            Func<bool> always = null;
+
+            menu.AddAction("Start / end match", "Start a match, or end the current one.",
+                delegate { if (state == State.Idle) startRequested = true; else endRequested = true; menu.Visible = false; }, always)
+                .Value = delegate { return state == State.Idle ? "Start" : (state == State.Running ? "End" : "Finishing"); };
+
+            menu.Add("Mode", "Free-for-all, or your team + allied bots vs an enemy team.",
+                delegate { return cfg.Mode == MatchMode.FreeForAll ? "Free-for-all" : "Team Deathmatch"; },
+                delegate (int d) { cfg.Mode = cfg.Mode == MatchMode.FreeForAll ? MatchMode.TeamDeathmatch : MatchMode.FreeForAll; }, idle);
+            menu.Add("Arena", "Where the match is played. 'Current location' uses where you stand.",
+                delegate { return DmConfig.Arenas[cfg.Arena].Name; },
+                delegate (int d) { cfg.Arena = Wrap(cfg.Arena + d, DmConfig.Arenas.Length); }, idle);
+            menu.Add("Arena radius", "Size of the play area. Leaving it for 10s kills you.",
+                delegate { return cfg.ArenaRadius + " m"; },
+                delegate (int d) { cfg.ArenaRadius = DmConfig.Clamp(cfg.ArenaRadius + d * 10, 40, 250); }, idle);
+
+            menu.Add("Enemy bots", "LIVE. Number of hostile AI players.",
+                delegate { return cfg.EnemyCount.ToString(); },
+                delegate (int d) { cfg.EnemyCount = DmConfig.Clamp(cfg.EnemyCount + d, 1, 40); Changed(); }, always);
+            menu.Add("Allied bots", "LIVE. AI teammates (Team Deathmatch only).",
+                delegate { return cfg.AllyCount.ToString(); },
+                delegate (int d) { cfg.AllyCount = DmConfig.Clamp(cfg.AllyCount + d, 0, 20); Changed(); }, always);
+            menu.Add("Difficulty", "LIVE. Combat skill, fire rate, health/armor, tactics. Resets accuracy to the preset.",
+                delegate { return cfg.DifficultyProfile.Name; },
+                delegate (int d)
+                {
+                    cfg.Difficulty = DmConfig.Clamp(cfg.Difficulty + d, 0, DmConfig.Difficulties.Length - 1);
+                    cfg.Accuracy = cfg.DifficultyProfile.DefaultAccuracy;
+                    Changed();
+                }, always);
+            menu.Add("Accuracy", "LIVE. Bot hit chance, 0-100%.",
+                delegate { return cfg.Accuracy + "%"; },
+                delegate (int d) { cfg.Accuracy = DmConfig.Clamp(cfg.Accuracy + d * 5, 0, 100); Changed(); }, always);
+            menu.Add("Aggression toward you", "LIVE. Chance an enemy bot hunts you instead of the nearest target.",
+                delegate { return cfg.PlayerBias + "%"; },
+                delegate (int d) { cfg.PlayerBias = DmConfig.Clamp(cfg.PlayerBias + d * 5, 0, 100); Changed(); }, always);
+            menu.Add("Weapons", "LIVE. Bot loadout; applies from each bot's next respawn.",
+                delegate { return DmConfig.Loadouts[cfg.Loadout].Name; },
+                delegate (int d) { cfg.Loadout = Wrap(cfg.Loadout + d, DmConfig.Loadouts.Length); Changed(); }, always);
+            menu.Add("Kill limit", "LIVE. First player (FFA) or team (TDM) to reach it wins. 0 = off.",
+                delegate { return cfg.KillLimit == 0 ? "Off" : cfg.KillLimit.ToString(); },
+                delegate (int d) { cfg.KillLimit = DmConfig.Clamp(cfg.KillLimit + d * 5, 0, 500); Changed(); }, always);
+            menu.Add("Time limit", "LIVE. Match length in minutes. 0 = off.",
+                delegate { return cfg.TimeLimit == 0 ? "Off" : cfg.TimeLimit + " min"; },
+                delegate (int d) { cfg.TimeLimit = DmConfig.Clamp(cfg.TimeLimit + d, 0, 60); Changed(); }, always);
+            menu.Add("Respawn delay", "LIVE. Seconds before you and bots respawn.",
+                delegate { return cfg.RespawnDelay + " s"; },
+                delegate (int d) { cfg.RespawnDelay = DmConfig.Clamp(cfg.RespawnDelay + d, 1, 15); Changed(); }, always);
+            menu.Add("Radar blips", "LIVE. Show every player on the radar, like Online.",
+                delegate { return OnOff(cfg.Blips); },
+                delegate (int d) { cfg.Blips = !cfg.Blips; Changed(); }, always);
+            menu.Add("Name tags", "LIVE. Gamertags above visible players.",
+                delegate { return OnOff(cfg.NameTags); },
+                delegate (int d) { cfg.NameTags = !cfg.NameTags; Changed(); }, always);
+            menu.Add("Clear traffic and pedestrians", "LIVE. Removes ambient peds, cars and police from the arena.",
+                delegate { return OnOff(cfg.ClearAmbient); },
+                delegate (int d) { cfg.ClearAmbient = !cfg.ClearAmbient; Changed(); }, always);
+            menu.Add("Give me the loadout", "Receive the selected weapon set whenever you spawn.",
+                delegate { return OnOff(cfg.PlayerLoadout); },
+                delegate (int d) { cfg.PlayerLoadout = !cfg.PlayerLoadout; }, always);
+            menu.Add("Return after match", "Teleport back to where you started when the match ends.",
+                delegate { return OnOff(cfg.ReturnAfterMatch); },
+                delegate (int d) { cfg.ReturnAfterMatch = !cfg.ReturnAfterMatch; }, always);
+            menu.AddAction("Save settings", "Write these settings to OfflinePvP.ini.",
+                delegate { cfg.Save(Settings); GTA.UI.Notification.Show("~g~Deathmatch settings saved."); }, always);
+        }
+
+        void Changed()
+        {
+            configVersion++;
+        }
+
+        static string OnOff(bool b)
+        {
+            return b ? "On" : "Off";
+        }
+
+        static int Wrap(int v, int n)
+        {
+            return ((v % n) + n) % n;
+        }
+
+        void OnKeyDown(object sender, KeyEventArgs e)
+        {
+            if (e.KeyCode == cfg.MenuKey)
+            {
+                menu.Visible = !menu.Visible;
+                return;
+            }
+            if (menu.HandleKey(e.KeyCode)) return;
+            if (state == State.Ended && e.KeyCode == Keys.Enter) endedAt = 0; // skip results screen
+        }
+
+        // ------------------------------------------------------------------ main loop
+
+        void OnTick(object sender, EventArgs e)
+        {
+            menu.Subtitle = state == State.Idle ? "SINGLE PLAYER DEATHMATCH" : (state == State.Running ? "MATCH IN PROGRESS" : "MATCH OVER");
+            menu.Tick();
+            shard.Tick();
+
+            if (startRequested)
+            {
+                startRequested = false;
+                StartMatch();
+            }
+            if (endRequested)
+            {
+                endRequested = false;
+                if (state == State.Running) EndMatch(true);
+            }
+
+            if (state == State.Idle) return;
+
+            KeepDeathSystemSuppressed();
+            SuppressWorld();
+            player.Ped = Game.Player.Character;
+
+            int now = Game.GameTime;
+            if (state == State.Running)
+            {
+                UpdatePlayer(now);
+                UpdateBots(now);
+                UpdateCorpses(now);
+                if (now >= nextRosterCheck)
+                {
+                    nextRosterCheck = now + 500;
+                    SyncRoster();
+                }
+                if (cfg.TimeLimit > 0 && now - matchStart >= cfg.TimeLimit * 60000) EndMatch(false);
+            }
+            else if (state == State.Ended && now - endedAt > ResultsMs)
+            {
+                Cleanup(false);
+                return;
+            }
+
+            DrawNameTags();
+            DrawHud(now);
+            DrawFeed(now);
+            if (state == State.Ended || Game.IsKeyPressed(cfg.ScoreboardKey)) DrawScoreboard();
+        }
+
+        // ------------------------------------------------------------------ match lifecycle
+
+        void StartMatch()
+        {
+            if (state != State.Idle) return;
+            Ped me = Game.Player.Character;
+            if (me.IsDead)
+            {
+                GTA.UI.Notification.Show("~r~You can't start a deathmatch while dead.");
+                return;
+            }
+
+            GTA.UI.Screen.FadeOut(500);
+            Wait(600);
+
+            origin = me.Position;
+            radius = cfg.ArenaRadius;
+            center = cfg.Arena == 0 ? me.Position : DmConfig.Arenas[cfg.Arena].Center;
+
+            if (me.IsInVehicle()) me.Task.ClearAllImmediately();
+            me.IsPositionFrozen = true; // don't fall through unstreamed ground
+            me.Position = center;
+
+            // Give the world time to stream collision/navmesh around the arena.
+            int deadline = Game.GameTime + 4000;
+            float ground = 0f;
+            while (Game.GameTime < deadline)
+            {
+                Wait(250);
+                ground = World.GetGroundHeight(new Vector2(center.X, center.Y));
+                if (ground != 0f && Game.GameTime > deadline - 2500) break;
+            }
+            if (ground != 0f) center = new Vector3(center.X, center.Y, ground);
+            me.IsPositionFrozen = false;
+
+            GenerateSpawns();
+            SetupRelationships(me);
+
+            combatants.Clear();
+            feed.Clear();
+            nextTeamId = 1;
+            player = new Combatant { Name = "You", IsPlayer = true, Team = 0, Ped = me, Alive = true };
+            combatants.Add(player);
+
+            if (cfg.ClearAmbient)
+            {
+                Function.Call(Hash.CLEAR_AREA_OF_PEDS, center.X, center.Y, center.Z, radius + 50f, 1);
+                Function.Call(Hash.CLEAR_AREA_OF_COPS, center.X, center.Y, center.Z, radius + 50f, 0);
+            }
+
+            Function.Call(Hash.TERMINATE_ALL_SCRIPTS_WITH_THIS_NAME, "respawn_controller");
+            KeepDeathSystemSuppressed();
+            Function.Call(Hash.SET_MAX_WANTED_LEVEL, 0);
+            Game.Player.WantedLevel = 0;
+            Game.Player.IgnoredByPolice = true;
+
+            areaBlip = World.CreateBlip(center, radius);
+            areaBlip.Color = BlipColor.Purple;
+            areaBlip.Alpha = 70;
+
+            state = State.Running;
+            int now = Game.GameTime;
+            matchStart = now;
+            nextRosterCheck = now;
+            outOfBoundsSince = 0;
+            SyncRoster(); // spawns the initial bots
+
+            PlacePlayer();
+            GTA.UI.Screen.FadeIn(800);
+            string title = cfg.Mode == MatchMode.FreeForAll ? "DEATHMATCH" : "TEAM DEATHMATCH";
+            string sub = cfg.KillLimit > 0 ? string.Format("First to {0} kills", cfg.KillLimit) : "Most kills wins";
+            shard.Show("SHOW_SHARD_CENTERED_MP_MESSAGE", title, sub, 4000);
+            AddFeed(string.Format("~p~{0}~s~ at {1}", title, DmConfig.Arenas[cfg.Arena].Name));
+        }
+
+        void EndMatch(bool aborted)
+        {
+            if (state != State.Running) return;
+            state = State.Ended;
+            endedAt = Game.GameTime;
+
+            foreach (Combatant c in combatants)
+            {
+                if (c.IsPlayer || c.Ped == null || !c.Ped.Exists() || c.Ped.IsDead) continue;
+                c.Ped.Task.ClearAll();
+                c.Ped.IsInvincible = true;
+                c.Ped.BlockPermanentEvents = true;
+            }
+            if (player.Alive) Game.Player.Character.IsInvincible = true;
+
+            string title, sub;
+            if (cfg.Mode == MatchMode.TeamDeathmatch)
+            {
+                int us = TeamScore(0), them = TeamScore(1);
+                title = us > them ? "~b~WINNER" : (us < them ? "~r~LOSER" : "DRAW");
+                sub = string.Format("Your team {0} - {1} Enemy team", us, them);
+            }
+            else
+            {
+                List<Combatant> ranked = Ranked();
+                Combatant top = ranked[0];
+                int pos = ranked.IndexOf(player) + 1;
+                title = top == player ? "~y~WINNER" : string.Format("{0}{1} PLACE", pos, Ordinal(pos));
+                sub = top == player ? string.Format("You won with {0} kills", player.Kills)
+                                    : string.Format("{0} won with {1} kills", top.Name, top.Kills);
+            }
+            if (aborted) sub = "Match ended early. " + sub;
+            resultLine = sub;
+            shard.Show("SHOW_SHARD_CENTERED_MP_MESSAGE", title, sub, 6000);
+            Audio.PlaySoundFrontend("Mission_Pass_Notify", "DLC_HEISTS_GENERAL_FRONTEND_SOUNDS");
+        }
+
+        void Cleanup(bool scriptAborting)
+        {
+            foreach (Combatant c in combatants)
+            {
+                if (c.IsPlayer) continue;
+                DeleteBlip(c);
+                if (c.Ped != null && c.Ped.Exists()) c.Ped.Delete();
+            }
+            foreach (KeyValuePair<Ped, int> kv in corpses)
+            {
+                if (kv.Key != null && kv.Key.Exists()) kv.Key.Delete();
+            }
+            corpses.Clear();
+            combatants.Clear();
+            if (areaBlip != null && areaBlip.Exists()) areaBlip.Delete();
+            areaBlip = null;
+            shard.Hide();
+
+            Ped me = Game.Player.Character;
+            if (me.IsDead) ResurrectPlayer(me.Position, me.Heading);
+            me.IsInvincible = false;
+
+            Game.Player.IgnoredByPolice = false;
+            Function.Call(Hash.SET_MAX_WANTED_LEVEL, 5);
+            RestoreDeathSystem(!scriptAborting);
+
+            if (!scriptAborting && cfg.ReturnAfterMatch && origin != Vector3.Zero)
+            {
+                GTA.UI.Screen.FadeOut(400);
+                Wait(450);
+                if (me.IsInVehicle()) me.Task.ClearAllImmediately();
+                me.Position = origin;
+                Wait(500);
+                GTA.UI.Screen.FadeIn(600);
+            }
+            state = State.Idle;
+        }
+
+        void OnAborted(object sender, EventArgs e)
+        {
+            if (state != State.Idle) Cleanup(true);
+        }
+
+        // ------------------------------------------------------------------ roster (live bot count)
+
+        void SyncRoster()
+        {
+            if (state != State.Running) return;
+            bool tdm = cfg.Mode == MatchMode.TeamDeathmatch;
+            SyncSide(false, cfg.EnemyCount);
+            SyncSide(true, tdm ? cfg.AllyCount : 0);
+        }
+
+        void SyncSide(bool allies, int wanted)
+        {
+            List<Combatant> side = combatants.Where(c => !c.IsPlayer && c.IsAlly == allies && !c.PendingRemoval).ToList();
+            // Count raised again: bots that were about to leave stay instead.
+            foreach (Combatant c in combatants.Where(c => !c.IsPlayer && c.IsAlly == allies && c.PendingRemoval))
+            {
+                if (side.Count >= wanted) break;
+                c.PendingRemoval = false;
+                side.Add(c);
+            }
+            int spawnedThisPass = 0;
+            for (int have = side.Count; have < wanted && spawnedThisPass < 3; have++, spawnedThisPass++)
+            {
+                Combatant c = new Combatant
+                {
+                    Name = BotNames.Make(rng, combatants.Select(x => x.Name).ToList()),
+                    IsAlly = allies,
+                    Team = cfg.Mode == MatchMode.TeamDeathmatch ? (allies ? 0 : 1) : nextTeamId++,
+                };
+                combatants.Add(c);
+                SpawnBot(c);
+                AddFeed(string.Format("{0} joined.", Colored(c)));
+            }
+            // Too many: dead ones leave now, live ones after they next die (no popping mid-fight).
+            for (int i = side.Count - 1; i >= 0 && side.Count(c => !c.PendingRemoval) > wanted; i--)
+            {
+                Combatant c = side[i];
+                c.PendingRemoval = true;
+                if (!c.Alive) RemoveBot(c);
+            }
+        }
+
+        void RemoveBot(Combatant c)
+        {
+            DeleteBlip(c);
+            if (c.Ped != null && c.Ped.Exists())
+            {
+                if (c.Alive) c.Ped.Delete();
+                else c.Ped.MarkAsNoLongerNeeded();
+            }
+            combatants.Remove(c);
+            if (c.Target != null) c.Target = null;
+            foreach (Combatant o in combatants) if (o.Target == c) o.Target = null;
+            AddFeed(string.Format("{0} left.", Colored(c)));
+        }
+
+        // ------------------------------------------------------------------ spawning
+
+        void GenerateSpawns()
+        {
+            spawns.Clear();
+            for (int attempt = 0; attempt < 300 && spawns.Count < 40; attempt++)
+            {
+                double ang = rng.NextDouble() * Math.PI * 2;
+                float dist = (float)(Math.Sqrt(rng.NextDouble()) * radius * 0.9);
+                float x = center.X + (float)Math.Cos(ang) * dist;
+                float y = center.Y + (float)Math.Sin(ang) * dist;
+                float z = World.GetGroundHeight(new Vector2(x, y));
+                if (z == 0f) z = center.Z;
+                Vector3 safe = World.GetSafeCoordForPed(new Vector3(x, y, z + 1f), false, 2 | 4 | 8); // not isolated, not interior, not water
+                if (safe == Vector3.Zero) continue;
+                if (Flat(safe, center) > radius) continue;
+                if (Math.Abs(safe.Z - center.Z) > 25f) continue; // rooftops, tunnels, sea floor
+                if (spawns.Any(s => s.DistanceTo(safe) < 6f)) continue;
+                spawns.Add(safe);
+            }
+            if (spawns.Count < 4)
+            {
+                // Navmesh not loaded or arena over water: fall back to a ring near the center.
+                for (int i = 0; i < 12; i++)
+                {
+                    double ang = Math.PI * 2 * i / 12.0;
+                    spawns.Add(center + new Vector3((float)Math.Cos(ang) * 15f, (float)Math.Sin(ang) * 15f, 0.5f));
+                }
+            }
+        }
+
+        /// <summary>Online-style spawn: among a few random points pick the one farthest from enemies.</summary>
+        Vector3 PickSpawn(Combatant who)
+        {
+            Vector3 best = spawns[rng.Next(spawns.Count)];
+            float bestScore = -1f;
+            for (int i = 0; i < 8; i++)
+            {
+                Vector3 cand = spawns[rng.Next(spawns.Count)];
+                float nearest = 9999f;
+                foreach (Combatant c in combatants)
+                {
+                    if (c == who || !c.Alive || !who.IsHostileTo(c) || c.Ped == null || !c.Ped.Exists()) continue;
+                    float d = c.Ped.Position.DistanceTo(cand);
+                    if (d < nearest) nearest = d;
+                }
+                if (nearest > bestScore)
+                {
+                    bestScore = nearest;
+                    best = cand;
+                }
+            }
+            return best;
+        }
+
+        void SpawnBot(Combatant c)
+        {
+            if (c.Ped != null && c.Ped.Exists())
+            {
+                if (c.Ped.IsDead) TrackCorpse(c.Ped);
+                else c.Ped.Delete();
+            }
+            c.Ped = null;
+
+            string[] pool = cfg.Mode == MatchMode.TeamDeathmatch ? (c.IsAlly ? AllyModels : EnemyModels) : FfaModels;
+            Model model = LoadModel(pool);
+            if (model == null)
+            {
+                c.RespawnAt = Game.GameTime + 2000; // retry later
+                return;
+            }
+
+            Vector3 pos = PickSpawn(c);
+            Ped ped = World.CreatePed(model, pos, (float)rng.Next(360));
+            model.MarkAsNoLongerNeeded();
+            if (ped == null)
+            {
+                c.RespawnAt = Game.GameTime + 2000;
+                return;
+            }
+
+            c.Ped = ped;
+            c.Alive = true;
+            c.Target = null;
+            c.NextThink = Game.GameTime + 300;
+            c.SpawnProtectUntil = Game.GameTime + SpawnProtectMs;
+
+            Function.Call(Hash.SET_PED_RANDOM_COMPONENT_VARIATION, ped, 0);
+            ped.RelationshipGroup = GroupFor(c);
+            ped.DropsEquippedWeaponOnDeath = false;
+            ped.IsInvincible = true;
+
+            DifficultyProfile p = cfg.DifficultyProfile;
+            ped.MaxHealth = 100 + p.ExtraHealth;
+            ped.Health = ped.MaxHealth;
+            ped.Armor = p.Armor;
+
+            WeaponHash[] set = DmConfig.Loadouts[cfg.Loadout].Weapons;
+            WeaponHash w = set[rng.Next(set.Length)];
+            ped.Weapons.Give(w, 9999, true, true);
+
+            ApplyStats(c);
+            UpdateBlip(c);
+        }
+
+        void ApplyStats(Combatant c)
+        {
+            Ped ped = c.Ped;
+            if (ped == null || !ped.Exists()) return;
+            DifficultyProfile p = cfg.DifficultyProfile;
+
+            ped.Accuracy = cfg.Accuracy;
+            ped.ShootRate = p.ShootRate;
+            Function.Call(Hash.SET_PED_COMBAT_ABILITY, ped, p.CombatAbility);
+            Function.Call(Hash.SET_PED_COMBAT_MOVEMENT, ped, p.CombatMovement);
+            Function.Call(Hash.SET_PED_COMBAT_RANGE, ped, 1);
+            Function.Call(Hash.SET_PED_COMBAT_ATTRIBUTES, ped, 0, p.UseCover);  // can use cover
+            Function.Call(Hash.SET_PED_COMBAT_ATTRIBUTES, ped, 1, false);       // can use vehicles
+            Function.Call(Hash.SET_PED_COMBAT_ATTRIBUTES, ped, 2, false);       // can do drivebys
+            Function.Call(Hash.SET_PED_COMBAT_ATTRIBUTES, ped, 5, true);        // fight armed peds when unarmed
+            Function.Call(Hash.SET_PED_COMBAT_ATTRIBUTES, ped, 46, true);       // always fight
+            Function.Call(Hash.SET_PED_COMBAT_ATTRIBUTES, ped, 58, true);       // never flee from combat
+            Function.Call(Hash.SET_PED_FLEE_ATTRIBUTES, ped, 0, false);
+            Function.Call(Hash.SET_PED_SEEING_RANGE, ped, radius * 2f);
+            Function.Call(Hash.SET_PED_HEARING_RANGE, ped, radius * 2f);
+            Function.Call(Hash.SET_PED_DIES_WHEN_INJURED, ped, true);           // no writhing on the ground
+            Function.Call(Hash.SET_PED_SUFFERS_CRITICAL_HITS, ped, true);       // headshots count
+            Function.Call(Hash.SET_PED_KEEP_TASK, ped, true);
+            ped.MaxHealth = 100 + p.ExtraHealth;
+            if (ped.Health > ped.MaxHealth) ped.Health = ped.MaxHealth;
+
+            c.AppliedConfigVersion = configVersion;
+            UpdateBlip(c);
+        }
+
+        Model LoadModel(string[] pool)
+        {
+            for (int attempt = 0; attempt < 4; attempt++)
+            {
+                Model m = new Model(pool[rng.Next(pool.Length)]);
+                if (!m.IsInCdImage || !m.IsPed) continue;
+                if (m.Request(1000)) return m;
+            }
+            return null;
+        }
+
+        void PlacePlayer()
+        {
+            Vector3 pos = PickSpawn(player);
+            Ped me = Game.Player.Character;
+            me.Position = pos;
+            me.Heading = (float)rng.Next(360);
+            me.Health = me.MaxHealth;
+            me.Armor = 50;
+            me.IsInvincible = true;
+            player.Alive = true;
+            player.SpawnProtectUntil = Game.GameTime + SpawnProtectMs;
+            if (cfg.PlayerLoadout)
+            {
+                foreach (WeaponHash w in DmConfig.Loadouts[cfg.Loadout].Weapons) me.Weapons.Give(w, 9999, false, true);
+                me.Weapons.Select(DmConfig.Loadouts[cfg.Loadout].Weapons[0], true);
+            }
+        }
+
+        // ------------------------------------------------------------------ relationships
+
+        void SetupRelationships(Ped me)
+        {
+            RelationshipGroup playerGroup = me.RelationshipGroup;
+            allyGroup = World.AddRelationshipGroup("SPDM_ALLY");
+            enemyGroup = World.AddRelationshipGroup("SPDM_ENEMY");
+            allyGroup.SetRelationshipBetweenGroups(playerGroup, Relationship.Companion, true);
+            allyGroup.SetRelationshipBetweenGroups(allyGroup, Relationship.Companion, true);
+            enemyGroup.SetRelationshipBetweenGroups(enemyGroup, Relationship.Companion, true);
+            enemyGroup.SetRelationshipBetweenGroups(playerGroup, Relationship.Hate, true);
+            enemyGroup.SetRelationshipBetweenGroups(allyGroup, Relationship.Hate, true);
+
+            // FFA: several mutually hostile groups (each also hates itself) so every bot fights every bot.
+            ffaGroups = new RelationshipGroup[FfaGroupCount];
+            for (int i = 0; i < FfaGroupCount; i++) ffaGroups[i] = World.AddRelationshipGroup("SPDM_FFA_" + i);
+            for (int i = 0; i < FfaGroupCount; i++)
+            {
+                ffaGroups[i].SetRelationshipBetweenGroups(playerGroup, Relationship.Hate, true);
+                for (int j = 0; j < FfaGroupCount; j++) ffaGroups[i].SetRelationshipBetweenGroups(ffaGroups[j], Relationship.Hate, true);
+            }
+        }
+
+        RelationshipGroup GroupFor(Combatant c)
+        {
+            if (cfg.Mode == MatchMode.TeamDeathmatch) return c.IsAlly ? allyGroup : enemyGroup;
+            return ffaGroups[c.Team % FfaGroupCount];
+        }
+
+        // ------------------------------------------------------------------ per-frame updates
+
+        void UpdatePlayer(int now)
+        {
+            Ped me = player.Ped;
+            if (player.Alive && player.SpawnProtectUntil != 0 && now > player.SpawnProtectUntil)
+            {
+                me.IsInvincible = false;
+                player.SpawnProtectUntil = 0;
+            }
+
+            Game.DisableControlThisFrame(Control.CharacterWheel);
+
+            if (player.Alive && me.IsDead)
+            {
+                OnDeath(player);
+                return;
+            }
+            if (!player.Alive)
+            {
+                if (now >= player.RespawnAt)
+                {
+                    Vector3 pos = PickSpawn(player);
+                    ResurrectPlayer(pos, (float)rng.Next(360));
+                    PlacePlayer();
+                }
+                return;
+            }
+
+            // Out of bounds countdown, like Online.
+            if (Flat(me.Position, center) > radius + 5f)
+            {
+                if (outOfBoundsSince == 0) outOfBoundsSince = now;
+                int left = (OutOfBoundsMs - (now - outOfBoundsSince)) / 1000 + 1;
+                GTA.UI.Screen.ShowSubtitle(string.Format("~r~Return to the deathmatch area: {0}s", left), 100);
+                if (now - outOfBoundsSince > OutOfBoundsMs)
+                {
+                    me.Kill();
+                    outOfBoundsSince = 0;
+                }
+            }
+            else
+            {
+                outOfBoundsSince = 0;
+            }
+        }
+
+        void UpdateBots(int now)
+        {
+            // Copy: callbacks may add/remove combatants.
+            foreach (Combatant c in combatants.ToArray())
+            {
+                if (c.IsPlayer) continue;
+
+                if (c.Alive && (c.Ped == null || !c.Ped.Exists() || c.Ped.IsDead))
+                {
+                    OnDeath(c);
+                    continue;
+                }
+                if (!c.Alive)
+                {
+                    if (now >= c.RespawnAt)
+                    {
+                        if (c.PendingRemoval) RemoveBot(c);
+                        else SpawnBot(c);
+                    }
+                    continue;
+                }
+
+                if (c.SpawnProtectUntil != 0 && now > c.SpawnProtectUntil)
+                {
+                    c.Ped.IsInvincible = false;
+                    c.SpawnProtectUntil = 0;
+                }
+                if (now >= c.NextThink)
+                {
+                    c.NextThink = now + 900 + rng.Next(600);
+                    Think(c, now);
+                }
+            }
+        }
+
+        void Think(Combatant bot, int now)
+        {
+            if (bot.AppliedConfigVersion != configVersion) ApplyStats(bot);
+
+            Ped ped = bot.Ped;
+            bool targetValid = bot.Target != null && bot.Target.Alive && bot.Target.Ped != null
+                && bot.Target.Ped.Exists() && bot.IsHostileTo(bot.Target);
+            Combatant next = bot.Target;
+            if (!targetValid || now - bot.TargetPickedAt > 10000)
+            {
+                next = PickTarget(bot);
+                bot.TargetPickedAt = now;
+            }
+
+            bool inCombat = Function.Call<bool>(Hash.IS_PED_IN_COMBAT, ped, 0);
+            if (next != null)
+            {
+                if (next != bot.Target || !inCombat) ped.Task.FightAgainst(next.Ped);
+            }
+            else if (Flat(ped.Position, center) > radius)
+            {
+                ped.Task.RunTo(spawns[rng.Next(spawns.Count)]);
+            }
+            else if (!inCombat)
+            {
+                ped.Task.FightAgainstHatedTargets(radius * 2f);
+            }
+            bot.Target = next;
+
+            bot.VisibleToPlayer = Function.Call<bool>(Hash.HAS_ENTITY_CLEAR_LOS_TO_ENTITY, Game.Player.Character, ped, 17);
+        }
+
+        Combatant PickTarget(Combatant bot)
+        {
+            if (!bot.IsAlly && player.Alive && bot.IsHostileTo(player) && rng.Next(100) < cfg.PlayerBias) return player;
+
+            Combatant best = null;
+            float bestScore = float.MaxValue;
+            Vector3 from = bot.Ped.Position;
+            foreach (Combatant c in combatants)
+            {
+                if (!c.Alive || !bot.IsHostileTo(c) || c.Ped == null || !c.Ped.Exists()) continue;
+                float score = c.Ped.Position.DistanceTo(from) + (float)rng.NextDouble() * 20f; // jitter avoids dog-piling
+                if (score < bestScore)
+                {
+                    bestScore = score;
+                    best = c;
+                }
+            }
+            return best;
+        }
+
+        void OnDeath(Combatant victim)
+        {
+            int now = Game.GameTime;
+            victim.Alive = false;
+            victim.Deaths++;
+            victim.Streak = 0;
+            victim.RespawnAt = now + cfg.RespawnDelay * 1000;
+            DeleteBlip(victim);
+
+            Combatant killer = ResolveKiller(victim.Ped);
+            if (killer != null && killer != victim)
+            {
+                bool teamKill = !killer.IsHostileTo(victim);
+                if (teamKill)
+                {
+                    killer.Kills--;
+                    AddFeed(string.Format("{0} ~o~team-killed~s~ {1}", Colored(killer), Colored(victim)));
+                }
+                else
+                {
+                    killer.Kills++;
+                    killer.Streak++;
+                    AddFeed(string.Format("{0} killed {1}", Colored(killer), Colored(victim)));
+                }
+                if (killer.IsPlayer && !teamKill) OnPlayerKill(victim);
+            }
+            else
+            {
+                AddFeed(string.Format("{0} died.", Colored(victim)));
+            }
+
+            if (victim.IsPlayer)
+            {
+                string by = killer != null && killer != victim ? "Killed by " + killer.Name : "";
+                shard.Show("SHOW_SHARD_WASTED_MP_MESSAGE", "~r~WASTED", by, cfg.RespawnDelay * 1000);
+            }
+            else
+            {
+                TrackCorpse(victim.Ped);
+                victim.Ped = null;
+            }
+
+            CheckKillLimit();
+        }
+
+        void OnPlayerKill(Combatant victim)
+        {
+            Audio.PlaySoundFrontend("HACKING_SUCCESS", "");
+            Weapon cur = Game.Player.Character.Weapons.Current;
+            if (cur != null && cur.Hash != WeaponHash.Unarmed) cur.Ammo += cur.MaxAmmoInClip * 2; // Online-style ammo pickup
+            string msg = null;
+            switch (player.Streak)
+            {
+                case 3: msg = "~y~Killing spree!"; break;
+                case 5: msg = "~o~Rampage!"; break;
+                case 8: msg = "~r~Unstoppable!"; break;
+                case 12: msg = "~p~Godlike!"; break;
+            }
+            if (msg != null) GTA.UI.Screen.ShowSubtitle(msg, 2500);
+        }
+
+        Combatant ResolveKiller(Ped victim)
+        {
+            if (victim == null || !victim.Exists()) return null;
+            Entity e = victim.Killer;
+            Ped kp = e as Ped;
+            if (kp == null)
+            {
+                Vehicle v = e as Vehicle;
+                if (v != null) kp = v.Driver;
+            }
+            if (kp == null) return null;
+            foreach (Combatant c in combatants)
+            {
+                if (c.Ped != null && c.Ped.Handle == kp.Handle) return c;
+            }
+            return null;
+        }
+
+        void CheckKillLimit()
+        {
+            if (cfg.KillLimit <= 0 || state != State.Running) return;
+            if (cfg.Mode == MatchMode.TeamDeathmatch)
+            {
+                if (TeamScore(0) >= cfg.KillLimit || TeamScore(1) >= cfg.KillLimit) EndMatch(false);
+            }
+            else if (combatants.Any(c => c.Kills >= cfg.KillLimit))
+            {
+                EndMatch(false);
+            }
+        }
+
+        void TrackCorpse(Ped ped)
+        {
+            if (ped == null || !ped.Exists()) return;
+            corpses.Add(new KeyValuePair<Ped, int>(ped, Game.GameTime));
+        }
+
+        void UpdateCorpses(int now)
+        {
+            for (int i = corpses.Count - 1; i >= 0; i--)
+            {
+                bool tooMany = corpses.Count > 15 && i == 0;
+                if (now - corpses[i].Value > 20000 || tooMany)
+                {
+                    Ped p = corpses[i].Key;
+                    if (p != null && p.Exists()) p.Delete();
+                    corpses.RemoveAt(i);
+                }
+            }
+        }
+
+        // ------------------------------------------------------------------ death system / world
+
+        static void KeepDeathSystemSuppressed()
+        {
+            Function.Call(Hash.PAUSE_DEATH_ARREST_RESTART, true);
+            Function.Call(Hash.IGNORE_NEXT_RESTART, true);
+            Function.Call(Hash.SET_FADE_OUT_AFTER_DEATH, false);
+        }
+
+        void RestoreDeathSystem(bool canWait)
+        {
+            Function.Call(Hash.PAUSE_DEATH_ARREST_RESTART, false);
+            Function.Call(Hash.IGNORE_NEXT_RESTART, false);
+            Function.Call(Hash.SET_FADE_OUT_AFTER_DEATH, true);
+            int running = Function.Call<int>(Hash.GET_NUMBER_OF_THREADS_RUNNING_THE_SCRIPT_WITH_THIS_HASH, Game.GenerateHash("respawn_controller"));
+            if (running > 0) return;
+            Function.Call(Hash.REQUEST_SCRIPT, "respawn_controller");
+            int deadline = Game.GameTime + 3000;
+            while (canWait && !Function.Call<bool>(Hash.HAS_SCRIPT_LOADED, "respawn_controller") && Game.GameTime < deadline) Wait(0);
+            if (Function.Call<bool>(Hash.HAS_SCRIPT_LOADED, "respawn_controller"))
+            {
+                Function.Call(Hash.START_NEW_SCRIPT, "respawn_controller", 1424);
+                Function.Call(Hash.SET_SCRIPT_AS_NO_LONGER_NEEDED, "respawn_controller");
+            }
+        }
+
+        static void ResurrectPlayer(Vector3 pos, float heading)
+        {
+            Function.Call(Hash.NETWORK_RESURRECT_LOCAL_PLAYER, pos.X, pos.Y, pos.Z, heading, false, false, false, 0, 0);
+            Ped me = Game.Player.Character;
+            if (me.IsDead) me.Resurrect();
+            me.Task.ClearAllImmediately();
+            Function.Call(Hash.ANIMPOSTFX_STOP_ALL);
+            Game.TimeScale = 1f;
+            if (GTA.UI.Screen.IsFadedOut) GTA.UI.Screen.FadeIn(300);
+        }
+
+        void SuppressWorld()
+        {
+            Game.Player.WantedLevel = 0;
+            if (!cfg.ClearAmbient) return;
+            Function.Call(Hash.SET_PED_DENSITY_MULTIPLIER_THIS_FRAME, 0f);
+            Function.Call(Hash.SET_SCENARIO_PED_DENSITY_MULTIPLIER_THIS_FRAME, 0f, 0f);
+            Function.Call(Hash.SET_VEHICLE_DENSITY_MULTIPLIER_THIS_FRAME, 0f);
+            Function.Call(Hash.SET_RANDOM_VEHICLE_DENSITY_MULTIPLIER_THIS_FRAME, 0f);
+            Function.Call(Hash.SET_PARKED_VEHICLE_DENSITY_MULTIPLIER_THIS_FRAME, 0f);
+        }
+
+        // ------------------------------------------------------------------ HUD
+
+        void UpdateBlip(Combatant c)
+        {
+            bool want = cfg.Blips && c.Alive && c.Ped != null && c.Ped.Exists();
+            if (!want)
+            {
+                DeleteBlip(c);
+                return;
+            }
+            if (c.Blip == null || !c.Blip.Exists())
+            {
+                c.Blip = c.Ped.AddBlip();
+                c.Blip.Scale = 0.75f;
+                c.Blip.Name = c.Name;
+            }
+            c.Blip.Color = c.IsAlly ? BlipColor.Blue : BlipColor.Red;
+        }
+
+        static void DeleteBlip(Combatant c)
+        {
+            if (c.Blip != null && c.Blip.Exists()) c.Blip.Delete();
+            c.Blip = null;
+        }
+
+        void DrawNameTags()
+        {
+            if (!cfg.NameTags) return;
+            Vector3 me = Game.Player.Character.Position;
+            foreach (Combatant c in combatants)
+            {
+                if (c.IsPlayer || !c.Alive || c.Ped == null || !c.Ped.Exists()) continue;
+                float d = c.Ped.Position.DistanceTo(me);
+                if (d > (c.IsAlly ? 120f : 60f)) continue;
+                if (!c.IsAlly && !c.VisibleToPlayer) continue;
+                System.Drawing.PointF p = GTA.UI.Screen.WorldToScreen(c.Ped.Position + new Vector3(0f, 0f, 1.15f));
+                if (p.IsEmpty) continue;
+                float scale = Math.Max(0.22f, 0.38f - d * 0.003f);
+                Draw.Text(c.Name, p.X, p.Y, scale, c.IsAlly ? Blue : Red, GTA.UI.Alignment.Center);
+            }
+        }
+
+        void DrawHud(int now)
+        {
+            const float right = 1270f, w = 250f;
+            float y = 200f;
+            Draw.Rect(right - w, y, w, 96f, Color.FromArgb(160, 0, 0, 0));
+
+            string time = "--:--";
+            if (cfg.TimeLimit > 0)
+            {
+                int left = Math.Max(0, cfg.TimeLimit * 60000 - ((state == State.Ended ? endedAt : now) - matchStart)) / 1000;
+                time = string.Format("{0:00}:{1:00}", left / 60, left % 60);
+            }
+
+            if (cfg.Mode == MatchMode.TeamDeathmatch)
+            {
+                Draw.Text(string.Format("~b~YOUR TEAM {0}", TeamScore(0)), right - w + 8f, y + 6f, 0.42f, Color.White, GTA.UI.Alignment.Left);
+                Draw.Text(string.Format("~r~ENEMY {0}", TeamScore(1)), right - 8f, y + 6f, 0.42f, Color.White, GTA.UI.Alignment.Right);
+            }
+            else
+            {
+                List<Combatant> ranked = Ranked();
+                int pos = ranked.IndexOf(player) + 1;
+                Draw.Text(string.Format("{0}{1} / {2}", pos, Ordinal(pos), ranked.Count), right - w + 8f, y + 6f, 0.42f, Gold, GTA.UI.Alignment.Left);
+                Combatant leader = ranked[0];
+                Draw.Text(string.Format("Leader: {0} ({1})", leader == player ? "You" : leader.Name, leader.Kills),
+                    right - 8f, y + 10f, 0.3f, Color.White, GTA.UI.Alignment.Right);
+            }
+            Draw.Text(string.Format("Kills {0}{1}   Deaths {2}", player.Kills, cfg.KillLimit > 0 ? " / " + cfg.KillLimit : "", player.Deaths),
+                right - w + 8f, y + 38f, 0.36f, Color.White, GTA.UI.Alignment.Left);
+            Draw.Text("Time  " + time, right - w + 8f, y + 64f, 0.36f, Color.White, GTA.UI.Alignment.Left);
+            Draw.Text(string.Format("Hold {0}: scores", cfg.ScoreboardKey), right - 8f, y + 66f, 0.28f,
+                Color.FromArgb(255, 180, 180, 180), GTA.UI.Alignment.Right);
+
+            if (state == State.Running && !player.Alive)
+            {
+                int s = Math.Max(0, (player.RespawnAt - now) / 1000 + 1);
+                Draw.Text(string.Format("Respawning in {0}", s), 640f, 600f, 0.6f, Color.White, GTA.UI.Alignment.Center);
+            }
+        }
+
+        void DrawFeed(int now)
+        {
+            feed.RemoveAll(f => now - f.Time > 7000);
+            float y = 305f;
+            for (int i = Math.Max(0, feed.Count - 6); i < feed.Count; i++)
+            {
+                Draw.Text(feed[i].Text, 1262f, y, 0.32f, Color.White, GTA.UI.Alignment.Right);
+                y += 20f;
+            }
+        }
+
+        void DrawScoreboard()
+        {
+            const float w = 560f, x = 640f - w / 2f, rowH = 22f;
+            float y = 90f;
+            Draw.Rect(x, y, w, 34f, Color.FromArgb(230, 180, 20, 30));
+            string head = state == State.Ended ? "RESULTS" : (cfg.Mode == MatchMode.TeamDeathmatch ? "TEAM DEATHMATCH" : "DEATHMATCH");
+            Draw.Text(head, 640f, y + 3f, 0.6f, Color.White, GTA.UI.Alignment.Center, GTA.UI.Font.Pricedown);
+            y += 34f;
+            if (state == State.Ended && resultLine != null)
+            {
+                Draw.Rect(x, y, w, rowH, Color.FromArgb(220, 0, 0, 0));
+                Draw.Text(resultLine + "   (Enter to close)", 640f, y + 2f, 0.32f, Gold, GTA.UI.Alignment.Center);
+                y += rowH;
+            }
+
+            if (cfg.Mode == MatchMode.TeamDeathmatch)
+            {
+                y = DrawTeamRows(y, 0, string.Format("YOUR TEAM  {0}", TeamScore(0)), Blue, x, w, rowH);
+                y = DrawTeamRows(y + 4f, 1, string.Format("ENEMY TEAM  {0}", TeamScore(1)), Red, x, w, rowH);
+            }
+            else
+            {
+                DrawRowHeader(x, y, w, rowH);
+                y += rowH;
+                int pos = 1;
+                foreach (Combatant c in Ranked()) y = DrawRow(c, pos++, x, y, w, rowH);
+            }
+        }
+
+        float DrawTeamRows(float y, int team, string title, Color color, float x, float w, float rowH)
+        {
+            Draw.Rect(x, y, w, rowH, Color.FromArgb(230, color.R / 3, color.G / 3, color.B / 3));
+            Draw.Text(title, x + 8f, y + 2f, 0.36f, color, GTA.UI.Alignment.Left);
+            y += rowH;
+            DrawRowHeader(x, y, w, rowH);
+            y += rowH;
+            int pos = 1;
+            foreach (Combatant c in Ranked().Where(c => c.Team == team)) y = DrawRow(c, pos++, x, y, w, rowH);
+            return y;
+        }
+
+        static void DrawRowHeader(float x, float y, float w, float rowH)
+        {
+            Color grey = Color.FromArgb(255, 170, 170, 170);
+            Draw.Rect(x, y, w, rowH, Color.FromArgb(220, 0, 0, 0));
+            Draw.Text("#", x + 10f, y + 3f, 0.28f, grey, GTA.UI.Alignment.Left);
+            Draw.Text("PLAYER", x + 40f, y + 3f, 0.28f, grey, GTA.UI.Alignment.Left);
+            Draw.Text("KILLS", x + w - 170f, y + 3f, 0.28f, grey, GTA.UI.Alignment.Right);
+            Draw.Text("DEATHS", x + w - 95f, y + 3f, 0.28f, grey, GTA.UI.Alignment.Right);
+            Draw.Text("K/D", x + w - 15f, y + 3f, 0.28f, grey, GTA.UI.Alignment.Right);
+        }
+
+        float DrawRow(Combatant c, int pos, float x, float y, float w, float rowH)
+        {
+            bool me = c.IsPlayer;
+            Draw.Rect(x, y, w, rowH, me ? Color.FromArgb(220, 60, 60, 20) : Color.FromArgb(180, 0, 0, 0));
+            Color fg = me ? Gold : (c.Alive ? Color.White : Color.FromArgb(255, 150, 150, 150));
+            string kd = (c.Deaths == 0 ? (float)c.Kills : (float)c.Kills / c.Deaths).ToString("0.00");
+            Draw.Text(pos.ToString(), x + 10f, y + 2f, 0.32f, fg, GTA.UI.Alignment.Left);
+            Draw.Text(me ? Game.Player.Name : c.Name, x + 40f, y + 2f, 0.32f, fg, GTA.UI.Alignment.Left);
+            Draw.Text(c.Kills.ToString(), x + w - 170f, y + 2f, 0.32f, fg, GTA.UI.Alignment.Right);
+            Draw.Text(c.Deaths.ToString(), x + w - 95f, y + 2f, 0.32f, fg, GTA.UI.Alignment.Right);
+            Draw.Text(kd, x + w - 15f, y + 2f, 0.32f, fg, GTA.UI.Alignment.Right);
+            return y + rowH;
+        }
+
+        // ------------------------------------------------------------------ helpers
+
+        List<Combatant> Ranked()
+        {
+            return combatants.OrderByDescending(c => c.Kills).ThenBy(c => c.Deaths).ThenBy(c => c.IsPlayer ? 0 : 1).ToList();
+        }
+
+        int TeamScore(int team)
+        {
+            return combatants.Where(c => c.Team == team).Sum(c => c.Kills);
+        }
+
+        string Colored(Combatant c)
+        {
+            if (c.IsPlayer) return "~y~You~s~";
+            if (cfg.Mode == MatchMode.TeamDeathmatch) return (c.IsAlly ? "~b~" : "~r~") + c.Name + "~s~";
+            return "~r~" + c.Name + "~s~";
+        }
+
+        void AddFeed(string text)
+        {
+            feed.Add(new FeedEntry { Text = text, Time = Game.GameTime });
+        }
+
+        static float Flat(Vector3 a, Vector3 b)
+        {
+            float dx = a.X - b.X, dy = a.Y - b.Y;
+            return (float)Math.Sqrt(dx * dx + dy * dy);
+        }
+
+        static string Ordinal(int n)
+        {
+            if (n % 100 >= 11 && n % 100 <= 13) return "th";
+            switch (n % 10)
+            {
+                case 1: return "st";
+                case 2: return "nd";
+                case 3: return "rd";
+                default: return "th";
+            }
+        }
+    }
+}
