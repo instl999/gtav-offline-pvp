@@ -22,12 +22,12 @@ for an item, please open an issue with corrections.
 | Time limit | ✅ | |
 | Weapons: forced loadout | ✅ | 8 weapon sets |
 | Weapons: owned weapons / weapon lock | ⬜ | |
-| Weapon, armor and health **pickups on the map** | ⬜ | High priority for the Online feel |
+| Weapon, armor and health **pickups on the map** | ✅ | Placed on random spawn points (not creator-placed); weapons follow the loadout; respawn timer is configurable |
 | Traffic on/off | ✅ | |
 | Police off | ✅ | |
 | Blips on/off | ✅ | |
-| Opponent health bars | ⬜ | |
-| Time of day / weather | ⬜ | |
+| Opponent health bars | ✅ | Health and armor bars above name tags |
+| Time of day / weather | ✅ | Restored when the match ends |
 | Up to 16 players (incl. you) | ✅ | Up to 41 here |
 | Team balancing | 🟡 | You set ally and enemy counts by hand |
 | Arena bounds | ✅ | Circular; Online uses creator-defined areas |
@@ -38,14 +38,14 @@ for an item, please open an issue with corrections.
 |---|---|---|
 | Respawn without hospital, on a timer | ✅ | |
 | Spawns placed away from enemies | ✅ | |
-| Spawn protection | 🟡 | Invincible only; no flashing see-through effect yet |
+| Spawn protection | ✅ | Invincible with a flickering see-through effect; ends early when you shoot |
 | Kill feed | ✅ | |
 | Killer cam / WASTED screen with killer name | 🟡 | WASTED shard with the killer's name; no killer cam or weapon icon |
 | Top-right leaderboard HUD | 🟡 | Layout approximates Online's |
 | Scoreboard with K/D | ✅ | |
 | Interaction menu: snacks and armor | ⬜ | |
 | Out-of-bounds timer | ✅ | |
-| Suicide penalty | ⬜ | |
+| Suicide penalty | ✅ | -1 kill for any death with no killer (falls, own explosives, out of bounds); can be turned off |
 | Bot names above heads | ✅ | |
 | Bots that play like Online players (strafing, peeking, rolling, rushing) | 🟡 | Uses the game's combat AI with tuned attributes |
 | Bots using pickups and vehicles | ⬜ | |

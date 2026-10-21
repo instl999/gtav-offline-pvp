@@ -56,11 +56,28 @@ namespace OfflinePvP
         string resultLine;
         RelationshipGroup allyGroup, enemyGroup;
         RelationshipGroup[] ffaGroups;
+        readonly List<PickupSpot> pickups = new List<PickupSpot>();
+        int nextPickupCheck;
+        bool envDirty, timeOverridden, weatherOverridden, savedClockPaused;
+        TimeSpan savedTime;
+        Weather savedWeather;
 
         sealed class FeedEntry
         {
             public string Text;
             public int Time;
+        }
+
+        enum PickupKind { Weapon, Health, Armor }
+
+        /// <summary>A fixed map location that holds one pickup and refills it on a timer.</summary>
+        sealed class PickupSpot
+        {
+            public Vector3 Position;
+            public PickupKind Kind;
+            public int Handle;      // native pickup handle, 0 = currently collected / not spawned
+            public Blip Blip;
+            public int RespawnAt;
         }
 
         public DeathmatchScript()
@@ -132,6 +149,24 @@ namespace OfflinePvP
             menu.Add("Name tags", "LIVE. Gamertags above visible players.",
                 delegate { return OnOff(cfg.NameTags); },
                 delegate (int d) { cfg.NameTags = !cfg.NameTags; Changed(); }, always);
+            menu.Add("Health bars", "LIVE. Health and armor bars above visible players.",
+                delegate { return OnOff(cfg.HealthBars); },
+                delegate (int d) { cfg.HealthBars = !cfg.HealthBars; Changed(); }, always);
+            menu.Add("Pickups", "LIVE. Weapon, health and armor pickups around the arena.",
+                delegate { return OnOff(cfg.Pickups); },
+                delegate (int d) { cfg.Pickups = !cfg.Pickups; Changed(); }, always);
+            menu.Add("Pickup respawn", "LIVE. Seconds before a collected pickup comes back.",
+                delegate { return cfg.PickupRespawn + " s"; },
+                delegate (int d) { cfg.PickupRespawn = DmConfig.Clamp(cfg.PickupRespawn + d * 5, 5, 120); Changed(); }, always);
+            menu.Add("Suicide penalty", "LIVE. Dying without a killer (falls, explosions, out of bounds) costs 1 kill.",
+                delegate { return OnOff(cfg.SuicidePenalty); },
+                delegate (int d) { cfg.SuicidePenalty = !cfg.SuicidePenalty; Changed(); }, always);
+            menu.Add("Time of day", "LIVE. Locks the clock for the match; restored afterwards.",
+                delegate { return DmConfig.TimeNames[cfg.TimeOfDay]; },
+                delegate (int d) { cfg.TimeOfDay = Wrap(cfg.TimeOfDay + d, DmConfig.TimeNames.Length); envDirty = true; }, always);
+            menu.Add("Weather", "LIVE. Weather for the match; restored afterwards.",
+                delegate { return DmConfig.WeatherNames[cfg.Weather]; },
+                delegate (int d) { cfg.Weather = Wrap(cfg.Weather + d, DmConfig.WeatherNames.Length); envDirty = true; }, always);
             menu.Add("Clear traffic and pedestrians", "LIVE. Removes ambient peds, cars and police from the arena.",
                 delegate { return OnOff(cfg.ClearAmbient); },
                 delegate (int d) { cfg.ClearAmbient = !cfg.ClearAmbient; Changed(); }, always);
@@ -192,6 +227,11 @@ namespace OfflinePvP
 
             if (state == State.Idle) return;
 
+            if (envDirty)
+            {
+                envDirty = false;
+                ApplyEnvironment();
+            }
             KeepDeathSystemSuppressed();
             SuppressWorld();
             player.Ped = Game.Player.Character;
@@ -202,6 +242,11 @@ namespace OfflinePvP
                 UpdatePlayer(now);
                 UpdateBots(now);
                 UpdateCorpses(now);
+                if (now >= nextPickupCheck)
+                {
+                    nextPickupCheck = now + 250;
+                    UpdatePickups(now);
+                }
                 if (now >= nextRosterCheck)
                 {
                     nextRosterCheck = now + 500;
@@ -215,7 +260,7 @@ namespace OfflinePvP
                 return;
             }
 
-            DrawNameTags();
+            DrawOverheads();
             DrawHud(now);
             DrawFeed(now);
             if (state == State.Ended || Game.IsKeyPressed(cfg.ScoreboardKey)) DrawScoreboard();
@@ -258,6 +303,8 @@ namespace OfflinePvP
 
             GenerateSpawns();
             SetupRelationships(me);
+            SaveEnvironment();
+            ApplyEnvironment();
 
             combatants.Clear();
             feed.Clear();
@@ -285,6 +332,7 @@ namespace OfflinePvP
             int now = Game.GameTime;
             matchStart = now;
             nextRosterCheck = now;
+            nextPickupCheck = now;
             outOfBoundsSince = 0;
             SyncRoster(); // spawns the initial bots
 
@@ -304,6 +352,8 @@ namespace OfflinePvP
 
             foreach (Combatant c in combatants)
             {
+                if (c.Ped != null && c.Ped.Exists()) c.Ped.ResetOpacity();
+                c.SpawnProtectUntil = 0;
                 if (c.IsPlayer || c.Ped == null || !c.Ped.Exists() || c.Ped.IsDead) continue;
                 c.Ped.Task.ClearAll();
                 c.Ped.IsInvincible = true;
@@ -349,11 +399,14 @@ namespace OfflinePvP
             combatants.Clear();
             if (areaBlip != null && areaBlip.Exists()) areaBlip.Delete();
             areaBlip = null;
+            ClearPickups();
+            RestoreEnvironment();
             shard.Hide();
 
             Ped me = Game.Player.Character;
             if (me.IsDead) ResurrectPlayer(me.Position, me.Heading);
             me.IsInvincible = false;
+            me.ResetOpacity();
 
             Game.Player.IgnoredByPolice = false;
             Function.Call(Hash.SET_MAX_WANTED_LEVEL, 5);
@@ -630,11 +683,7 @@ namespace OfflinePvP
         void UpdatePlayer(int now)
         {
             Ped me = player.Ped;
-            if (player.Alive && player.SpawnProtectUntil != 0 && now > player.SpawnProtectUntil)
-            {
-                me.IsInvincible = false;
-                player.SpawnProtectUntil = 0;
-            }
+            if (player.Alive) UpdateSpawnProtection(player, now);
 
             Game.DisableControlThisFrame(Control.CharacterWheel);
 
@@ -694,17 +743,35 @@ namespace OfflinePvP
                     continue;
                 }
 
-                if (c.SpawnProtectUntil != 0 && now > c.SpawnProtectUntil)
-                {
-                    c.Ped.IsInvincible = false;
-                    c.SpawnProtectUntil = 0;
-                }
+                UpdateSpawnProtection(c, now);
                 if (now >= c.NextThink)
                 {
                     c.NextThink = now + 900 + rng.Next(600);
                     Think(c, now);
                 }
             }
+        }
+
+        /// <summary>Online-style spawn protection: invincible and flickering until it runs out or you open fire.</summary>
+        static void UpdateSpawnProtection(Combatant c, int now)
+        {
+            if (c.SpawnProtectUntil == 0) return;
+            Ped ped = c.Ped;
+            if (ped == null || !ped.Exists()) return;
+            if (now > c.SpawnProtectUntil || ped.IsShooting)
+            {
+                EndSpawnProtection(c);
+                return;
+            }
+            ped.Opacity = (now / 120) % 2 == 0 ? 255 : 100;
+        }
+
+        static void EndSpawnProtection(Combatant c)
+        {
+            c.SpawnProtectUntil = 0;
+            if (c.Ped == null || !c.Ped.Exists()) return;
+            c.Ped.IsInvincible = false;
+            c.Ped.ResetOpacity();
         }
 
         void Think(Combatant bot, int now)
@@ -767,8 +834,11 @@ namespace OfflinePvP
             victim.Streak = 0;
             victim.RespawnAt = now + cfg.RespawnDelay * 1000;
             DeleteBlip(victim);
+            if (victim.Ped != null && victim.Ped.Exists()) victim.Ped.ResetOpacity();
+            victim.SpawnProtectUntil = 0;
 
             Combatant killer = ResolveKiller(victim.Ped);
+            bool penalty = false;
             if (killer != null && killer != victim)
             {
                 bool teamKill = !killer.IsHostileTo(victim);
@@ -787,12 +857,16 @@ namespace OfflinePvP
             }
             else
             {
-                AddFeed(string.Format("{0} died.", Colored(victim)));
+                // No other combatant got the kill: fell, blew themselves up or left the arena. Online docks a point for it.
+                penalty = cfg.SuicidePenalty;
+                if (penalty) victim.Kills--;
+                string how = killer != victim ? "died" : (victim.IsPlayer ? "killed yourself" : "killed themselves");
+                AddFeed(string.Format("{0} {1}.{2}", Colored(victim), how, penalty ? " ~r~-1~s~" : ""));
             }
 
             if (victim.IsPlayer)
             {
-                string by = killer != null && killer != victim ? "Killed by " + killer.Name : "";
+                string by = killer != null && killer != victim ? "Killed by " + killer.Name : (penalty ? "Suicide: -1 kill" : "");
                 shard.Show("SHOW_SHARD_WASTED_MP_MESSAGE", "~r~WASTED", by, cfg.RespawnDelay * 1000);
             }
             else
@@ -871,6 +945,169 @@ namespace OfflinePvP
             }
         }
 
+        // ------------------------------------------------------------------ pickups
+
+        void CreatePickupSpots()
+        {
+            ClearPickups();
+            // Half weapons, a quarter each health and armor, spread over random spawn points.
+            List<Vector3> pool = spawns.OrderBy(x => rng.Next()).ToList();
+            int count = Math.Min(pool.Count, DmConfig.Clamp(spawns.Count / 3, 4, 14));
+            for (int i = 0; i < count; i++)
+            {
+                PickupKind kind = i % 4 == 1 ? PickupKind.Health : (i % 4 == 3 ? PickupKind.Armor : PickupKind.Weapon);
+                pickups.Add(new PickupSpot { Position = pool[i], Kind = kind });
+            }
+        }
+
+        void UpdatePickups(int now)
+        {
+            if (!cfg.Pickups)
+            {
+                if (pickups.Count > 0) ClearPickups();
+                return;
+            }
+            if (pickups.Count == 0) CreatePickupSpots();
+            foreach (PickupSpot spot in pickups)
+            {
+                if (spot.Handle != 0)
+                {
+                    bool gone = !Function.Call<bool>(Hash.DOES_PICKUP_EXIST, spot.Handle)
+                        || Function.Call<bool>(Hash.HAS_PICKUP_BEEN_COLLECTED, spot.Handle);
+                    if (gone)
+                    {
+                        RemovePickup(spot);
+                        spot.RespawnAt = now + cfg.PickupRespawn * 1000;
+                    }
+                }
+                else if (now >= spot.RespawnAt)
+                {
+                    SpawnPickup(spot);
+                }
+                UpdatePickupBlip(spot);
+            }
+        }
+
+        void SpawnPickup(PickupSpot spot)
+        {
+            PickupType type;
+            int value = 0;
+            if (spot.Kind == PickupKind.Health) type = PickupType.Health;
+            else if (spot.Kind == PickupKind.Armor) type = PickupType.Armour;
+            else
+            {
+                type = WeaponPickupFor(DmConfig.Loadouts[cfg.Loadout].Weapons); // follows live loadout changes
+                value = 120; // ammo
+            }
+            const int flags = (1 << 3) | (1 << 8) | (1 << 9); // placement: snap to ground, upright, rotate
+            spot.Handle = Function.Call<int>(Hash.CREATE_PICKUP, type, spot.Position.X, spot.Position.Y, spot.Position.Z,
+                flags, value, true, 0);
+            if (spot.Handle == 0) spot.RespawnAt = Game.GameTime + 5000; // retry later
+        }
+
+        /// <summary>A random pickup from the loadout; weapons with no pickup type are skipped, falling back to a carbine.</summary>
+        PickupType WeaponPickupFor(WeaponHash[] set)
+        {
+            List<PickupType> types = new List<PickupType>();
+            foreach (WeaponHash w in set)
+            {
+                PickupType t;
+                if (Enum.TryParse("Weapon" + w, true, out t)) types.Add(t);
+            }
+            return types.Count > 0 ? types[rng.Next(types.Count)] : PickupType.WeaponCarbineRifle;
+        }
+
+        void UpdatePickupBlip(PickupSpot spot)
+        {
+            if (!cfg.Blips || spot.Handle == 0)
+            {
+                if (spot.Blip != null && spot.Blip.Exists()) spot.Blip.Delete();
+                spot.Blip = null;
+                return;
+            }
+            if (spot.Blip != null && spot.Blip.Exists()) return;
+            spot.Blip = World.CreateBlip(spot.Position);
+            spot.Blip.Sprite = spot.Kind == PickupKind.Health ? BlipSprite.Health
+                : (spot.Kind == PickupKind.Armor ? BlipSprite.Armor : BlipSprite.Pistol);
+            spot.Blip.Color = spot.Kind == PickupKind.Health ? BlipColor.Green
+                : (spot.Kind == PickupKind.Armor ? BlipColor.Blue : BlipColor.White);
+            spot.Blip.Scale = 0.6f;
+            spot.Blip.IsShortRange = true;
+        }
+
+        static void RemovePickup(PickupSpot spot)
+        {
+            if (spot.Handle != 0 && Function.Call<bool>(Hash.DOES_PICKUP_EXIST, spot.Handle))
+                Function.Call(Hash.REMOVE_PICKUP, spot.Handle);
+            spot.Handle = 0;
+            if (spot.Blip != null && spot.Blip.Exists()) spot.Blip.Delete();
+            spot.Blip = null;
+        }
+
+        void ClearPickups()
+        {
+            foreach (PickupSpot spot in pickups) RemovePickup(spot);
+            pickups.Clear();
+        }
+
+        // ------------------------------------------------------------------ time of day / weather
+
+        void SaveEnvironment()
+        {
+            savedTime = World.CurrentTimeOfDay;
+            savedWeather = World.Weather;
+            savedClockPaused = World.IsClockPaused;
+            timeOverridden = weatherOverridden = false;
+        }
+
+        void ApplyEnvironment()
+        {
+            int hour = DmConfig.TimeHours[cfg.TimeOfDay];
+            if (hour >= 0)
+            {
+                World.CurrentTimeOfDay = new TimeSpan(hour, 0, 0);
+                World.IsClockPaused = true;
+                timeOverridden = true;
+            }
+            else if (timeOverridden)
+            {
+                RestoreTime();
+            }
+
+            string weather = DmConfig.WeatherIds[cfg.Weather];
+            if (weather != null)
+            {
+                Function.Call(Hash.SET_OVERRIDE_WEATHER, weather);
+                Function.Call(Hash.SET_WEATHER_TYPE_NOW_PERSIST, weather);
+                weatherOverridden = true;
+            }
+            else if (weatherOverridden)
+            {
+                RestoreWeather();
+            }
+        }
+
+        void RestoreEnvironment()
+        {
+            if (timeOverridden) RestoreTime();
+            if (weatherOverridden) RestoreWeather();
+        }
+
+        void RestoreTime()
+        {
+            World.CurrentTimeOfDay = savedTime;
+            World.IsClockPaused = savedClockPaused;
+            timeOverridden = false;
+        }
+
+        void RestoreWeather()
+        {
+            Function.Call(Hash.CLEAR_OVERRIDE_WEATHER);
+            Function.Call(Hash.CLEAR_WEATHER_TYPE_PERSIST);
+            World.Weather = savedWeather;
+            weatherOverridden = false;
+        }
+
         // ------------------------------------------------------------------ death system / world
 
         static void KeepDeathSystemSuppressed()
@@ -944,9 +1181,10 @@ namespace OfflinePvP
             c.Blip = null;
         }
 
-        void DrawNameTags()
+        /// <summary>Name tags and Online-style health/armor bars above visible players.</summary>
+        void DrawOverheads()
         {
-            if (!cfg.NameTags) return;
+            if (!cfg.NameTags && !cfg.HealthBars) return;
             Vector3 me = Game.Player.Character.Position;
             foreach (Combatant c in combatants)
             {
@@ -957,8 +1195,22 @@ namespace OfflinePvP
                 System.Drawing.PointF p = GTA.UI.Screen.WorldToScreen(c.Ped.Position + new Vector3(0f, 0f, 1.15f));
                 if (p.IsEmpty) continue;
                 float scale = Math.Max(0.22f, 0.38f - d * 0.003f);
-                Draw.Text(c.Name, p.X, p.Y, scale, c.IsAlly ? Blue : Red, GTA.UI.Alignment.Center);
+                Color color = c.IsAlly ? Blue : Red;
+                if (cfg.NameTags) Draw.Text(c.Name, p.X, p.Y, scale, color, GTA.UI.Alignment.Center);
+                if (cfg.HealthBars) DrawHealthBar(c.Ped, p.X, p.Y - 9f, 70f * scale / 0.38f, color);
             }
+        }
+
+        static void DrawHealthBar(Ped ped, float cx, float y, float w, Color color)
+        {
+            // Bots die at the injured threshold (100), so the bar covers only the health above it.
+            int max = Math.Max(1, ped.MaxHealth - 100);
+            float hp = Math.Max(0f, Math.Min(1f, (ped.Health - 100) / (float)max));
+            float armor = Math.Max(0f, Math.Min(1f, ped.Armor / 100f));
+            float x = cx - w / 2f;
+            Draw.Rect(x - 1f, y - 1f, w + 2f, 7f, Color.FromArgb(170, 0, 0, 0));
+            Draw.Rect(x, y, w * hp, 3f, color);
+            if (armor > 0f) Draw.Rect(x, y + 3.5f, w * armor, 1.5f, Color.FromArgb(255, 220, 220, 220));
         }
 
         void DrawHud(int now)

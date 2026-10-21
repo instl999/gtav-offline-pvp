@@ -45,12 +45,13 @@ namespace OfflinePvP
     internal sealed class SimpleMenu
     {
         const float X = 30f, Y = 50f, W = 400f, HeaderH = 46f, RowH = 25f;
+        const int MaxVisible = 18; // rows that fit in 720 px with the header and help box; the rest scroll
 
         public string Title;
         public string Subtitle;
         public readonly List<MenuItem> Items = new List<MenuItem>();
         public bool Visible;
-        int index;
+        int index, first;
 
         public SimpleMenu(string title)
         {
@@ -96,7 +97,9 @@ namespace OfflinePvP
             Draw.Text(string.Format("{0}/{1}", index + 1, Items.Count), X + W - 8f, y + 3f, 0.33f, Color.White, GTA.UI.Alignment.Right);
             y += RowH;
 
-            for (int i = 0; i < Items.Count; i++)
+            if (index < first) first = index;
+            if (index >= first + MaxVisible) first = index - MaxVisible + 1;
+            for (int i = first; i < Items.Count && i < first + MaxVisible; i++)
             {
                 MenuItem it = Items[i];
                 bool sel = i == index;

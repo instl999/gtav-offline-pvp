@@ -13,9 +13,11 @@ Inspired by single-player "online PvP" mods for Red Dead Redemption 2.
 - **Free-for-all** (everyone hostile) and **Team Deathmatch** (you + allied bots vs an enemy team).
 - **Live tuning from the F7 menu, mid-match:** enemy/ally bot count (bots join and leave like real players),
   difficulty preset (combat skill, fire rate, health/armor, cover use), accuracy %, how often bots hunt *you*,
-  weapon set, kill limit, time limit, respawn delay, radar blips, name tags, traffic and pedestrian clearing.
+  weapon set, kill limit, time limit, respawn delay, radar blips, name tags, health bars, pickups and their respawn time,
+  suicide penalty, time of day and weather, traffic and pedestrian clearing.
 - **Online feel:** gamertag-style bot names, kill feed, joined/left messages, WASTED and WINNER screens,
-  spawns placed away from enemies, 1.5 s spawn protection, ammo on kill, out-of-bounds timer,
+  spawns placed away from enemies, 1.5 s flickering spawn protection (ends early when you shoot),
+  weapon/health/armor pickups that respawn on a timer, -1 suicide penalty, ammo on kill, out-of-bounds timer,
   K/D scoreboard and results screen.
 - **No hospital trips:** story-mode death handling is paused during a match and restored afterwards.
 - **Arenas:** where you're standing (adjustable radius) or 9 presets around the map.
