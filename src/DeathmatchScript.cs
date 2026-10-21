@@ -55,6 +55,23 @@ namespace OfflinePvP
         int matchStart, endedAt, outOfBoundsSince, nextRosterCheck, nextTeamId;
         string resultLine;
         RelationshipGroup allyGroup, enemyGroup;
+
+        // Last Team Standing
+        readonly int[] roundWins = new int[2];
+        int roundNo, nextRoundAt;
+        bool roundLive;
+
+        // King of the Hill
+        const float HillRadius = 12f;
+        Vector3 hill;
+        Blip hillBlip;
+        Combatant king;
+        bool hillContested;
+        int nextHillTick;
+
+        bool Teams { get { return cfg.Mode == MatchMode.TeamDeathmatch || cfg.Mode == MatchMode.LastTeamStanding; } }
+        bool Lts { get { return cfg.Mode == MatchMode.LastTeamStanding; } }
+        bool Koth { get { return cfg.Mode == MatchMode.KingOfTheHill; } }
         RelationshipGroup[] ffaGroups;
         readonly List<PickupSpot> pickups = new List<PickupSpot>();
         int nextPickupCheck;
@@ -83,6 +100,7 @@ namespace OfflinePvP
         public DeathmatchScript()
         {
             cfg.Load(Settings);
+            Progression.Init(System.IO.Path.Combine(BaseDirectory, "OfflinePvP_Profile.ini"));
             BuildMenu();
             Tick += OnTick;
             KeyDown += OnKeyDown;
@@ -101,9 +119,15 @@ namespace OfflinePvP
                 delegate { if (state == State.Idle) startRequested = true; else endRequested = true; menu.Visible = false; }, always)
                 .Value = delegate { return state == State.Idle ? "Start" : (state == State.Running ? "End" : "Finishing"); };
 
-            menu.Add("Mode", "Free-for-all, or your team + allied bots vs an enemy team.",
-                delegate { return cfg.Mode == MatchMode.FreeForAll ? "Free-for-all" : "Team Deathmatch"; },
-                delegate (int d) { cfg.Mode = cfg.Mode == MatchMode.FreeForAll ? MatchMode.TeamDeathmatch : MatchMode.FreeForAll; }, idle);
+            menu.Add("Mode", "Deathmatch, Team Deathmatch, Last Team Standing (rounds, no respawns) or King of the Hill.",
+                delegate { return DmConfig.ModeNames[(int)cfg.Mode]; },
+                delegate (int d) { cfg.Mode = (MatchMode)Wrap((int)cfg.Mode + d, DmConfig.ModeNames.Length); }, idle);
+            menu.Add("Rounds to win", "LIVE. Last Team Standing: rounds a team needs. No respawns within a round.",
+                delegate { return cfg.RoundsToWin.ToString(); },
+                delegate (int d) { cfg.RoundsToWin = DmConfig.Clamp(cfg.RoundsToWin + d, 1, 10); }, delegate { return Lts; });
+            menu.Add("Hill target score", "LIVE. King of the Hill: 1 point per second you hold the hill alone.",
+                delegate { return cfg.HillTarget.ToString(); },
+                delegate (int d) { cfg.HillTarget = DmConfig.Clamp(cfg.HillTarget + d * 10, 30, 600); }, delegate { return Koth; });
             menu.Add("Arena", "Where the match is played. 'Current location' uses where you stand.",
                 delegate { return DmConfig.Arenas[cfg.Arena].Name; },
                 delegate (int d) { cfg.Arena = Wrap(cfg.Arena + d, DmConfig.Arenas.Length); }, idle);
@@ -114,7 +138,7 @@ namespace OfflinePvP
             menu.Add("Enemy bots", "LIVE. Number of hostile AI players.",
                 delegate { return cfg.EnemyCount.ToString(); },
                 delegate (int d) { cfg.EnemyCount = DmConfig.Clamp(cfg.EnemyCount + d, 1, 40); Changed(); }, always);
-            menu.Add("Allied bots", "LIVE. AI teammates (Team Deathmatch only).",
+            menu.Add("Allied bots", "LIVE. AI teammates (team modes only).",
                 delegate { return cfg.AllyCount.ToString(); },
                 delegate (int d) { cfg.AllyCount = DmConfig.Clamp(cfg.AllyCount + d, 0, 20); Changed(); }, always);
             menu.Add("Difficulty", "LIVE. Combat skill, fire rate, health/armor, tactics. Resets accuracy to the preset.",
@@ -210,7 +234,12 @@ namespace OfflinePvP
 
         void OnTick(object sender, EventArgs e)
         {
-            menu.Subtitle = state == State.Idle ? "SINGLE PLAYER DEATHMATCH" : (state == State.Running ? "MATCH IN PROGRESS" : "MATCH OVER");
+            if (Session.OpenJobsMenu)
+            {
+                Session.OpenJobsMenu = false;
+                menu.Visible = true;
+            }
+            menu.Subtitle = state == State.Idle ? "JOBS" : (state == State.Running ? "MATCH IN PROGRESS" : "MATCH OVER");
             menu.Tick();
             shard.Tick();
 
@@ -252,8 +281,15 @@ namespace OfflinePvP
                     nextRosterCheck = now + 500;
                     SyncRoster();
                 }
-                if (cfg.TimeLimit > 0 && now - matchStart >= cfg.TimeLimit * 60000) EndMatch(false);
+                if (Lts && !roundLive && nextRoundAt != 0 && now >= nextRoundAt) StartRound();
+                if (Koth && now >= nextHillTick)
+                {
+                    nextHillTick = now + 1000;
+                    UpdateHill();
+                }
+                if (state == State.Running && cfg.TimeLimit > 0 && now - matchStart >= cfg.TimeLimit * 60000) EndMatch(false);
             }
+            if (Koth && state != State.Idle) DrawHill();
             else if (state == State.Ended && now - endedAt > ResultsMs)
             {
                 Cleanup(false);
@@ -318,8 +354,8 @@ namespace OfflinePvP
                 Function.Call(Hash.CLEAR_AREA_OF_COPS, center.X, center.Y, center.Z, radius + 50f, 0);
             }
 
-            Function.Call(Hash.TERMINATE_ALL_SCRIPTS_WITH_THIS_NAME, "respawn_controller");
-            KeepDeathSystemSuppressed();
+            Session.MatchActive = true; // freemode session stands down
+            DeathControl.Acquire(DeathOwner);
             Function.Call(Hash.SET_MAX_WANTED_LEVEL, 0);
             Game.Player.WantedLevel = 0;
             Game.Player.IgnoredByPolice = true;
@@ -334,12 +370,24 @@ namespace OfflinePvP
             nextRosterCheck = now;
             nextPickupCheck = now;
             outOfBoundsSince = 0;
-            SyncRoster(); // spawns the initial bots
+            roundWins[0] = roundWins[1] = 0;
+            roundNo = 1;
+            nextRoundAt = 0;
+            roundLive = false;
+            king = null;
+            hillContested = false;
+            if (Koth) SetupHill();
+            // Everyone is in from the first second, like an Online job (SyncRoster adds at most 3 per side per pass).
+            for (int i = 0; i < 20 && combatants.Count(c => !c.IsPlayer) < cfg.EnemyCount + (Teams ? cfg.AllyCount : 0); i++) SyncRoster();
+            roundLive = Lts;
 
             PlacePlayer();
             GTA.UI.Screen.FadeIn(800);
-            string title = cfg.Mode == MatchMode.FreeForAll ? "DEATHMATCH" : "TEAM DEATHMATCH";
-            string sub = cfg.KillLimit > 0 ? string.Format("First to {0} kills", cfg.KillLimit) : "Most kills wins";
+            string title = DmConfig.ModeNames[(int)cfg.Mode].ToUpperInvariant();
+            string sub;
+            if (Lts) sub = string.Format("No respawns. First team to {0} rounds", cfg.RoundsToWin);
+            else if (Koth) sub = string.Format("Hold the hill alone. First to {0} points", cfg.HillTarget);
+            else sub = cfg.KillLimit > 0 ? string.Format("First to {0} kills", cfg.KillLimit) : "Most kills wins";
             shard.Show("SHOW_SHARD_CENTERED_MP_MESSAGE", title, sub, 4000);
             AddFeed(string.Format("~p~{0}~s~ at {1}", title, DmConfig.Arenas[cfg.Arena].Name));
         }
@@ -362,7 +410,7 @@ namespace OfflinePvP
             if (player.Alive) Game.Player.Character.IsInvincible = true;
 
             string title, sub;
-            if (cfg.Mode == MatchMode.TeamDeathmatch)
+            if (Teams)
             {
                 int us = TeamScore(0), them = TeamScore(1);
                 title = us > them ? "~b~WINNER" : (us < them ? "~r~LOSER" : "DRAW");
@@ -374,10 +422,23 @@ namespace OfflinePvP
                 Combatant top = ranked[0];
                 int pos = ranked.IndexOf(player) + 1;
                 title = top == player ? "~y~WINNER" : string.Format("{0}{1} PLACE", pos, Ordinal(pos));
-                sub = top == player ? string.Format("You won with {0} kills", player.Kills)
-                                    : string.Format("{0} won with {1} kills", top.Name, top.Kills);
+                sub = top == player ? string.Format("You won with {0} {1}", ScoreOf(player), ScoreUnit)
+                                    : string.Format("{0} won with {1} {2}", top.Name, ScoreOf(top), ScoreUnit);
             }
-            if (aborted) sub = "Match ended early. " + sub;
+            if (aborted)
+            {
+                sub = "Match ended early. " + sub; // like quitting a job in Online: no payout
+            }
+            else
+            {
+                bool won = Teams ? TeamScore(0) > TeamScore(1) : Ranked()[0] == player;
+                int rp = 500 + 100 * Math.Max(0, player.Kills) + 5 * player.Points + (won ? 1000 : 0);
+                int cash = 1000 + 250 * Math.Max(0, player.Kills) + (won ? 4000 : 0);
+                Progression.AddRP(rp, DmConfig.ModeNames[(int)cfg.Mode]);
+                Progression.AddCash(cash, DmConfig.ModeNames[(int)cfg.Mode] + " payout");
+                Progression.RecordMatch(won);
+                sub += string.Format("   +{0:N0} RP  +${1:N0}", rp, cash);
+            }
             resultLine = sub;
             shard.Show("SHOW_SHARD_CENTERED_MP_MESSAGE", title, sub, 6000);
             Audio.PlaySoundFrontend("Mission_Pass_Notify", "DLC_HEISTS_GENERAL_FRONTEND_SOUNDS");
@@ -401,6 +462,8 @@ namespace OfflinePvP
             areaBlip = null;
             ClearPickups();
             RestoreEnvironment();
+            if (hillBlip != null && hillBlip.Exists()) hillBlip.Delete();
+            hillBlip = null;
             shard.Hide();
 
             Ped me = Game.Player.Character;
@@ -422,6 +485,7 @@ namespace OfflinePvP
                 GTA.UI.Screen.FadeIn(600);
             }
             state = State.Idle;
+            Session.MatchActive = false;
         }
 
         void OnAborted(object sender, EventArgs e)
@@ -434,7 +498,7 @@ namespace OfflinePvP
         void SyncRoster()
         {
             if (state != State.Running) return;
-            bool tdm = cfg.Mode == MatchMode.TeamDeathmatch;
+            bool tdm = Teams;
             SyncSide(false, cfg.EnemyCount);
             SyncSide(true, tdm ? cfg.AllyCount : 0);
         }
@@ -454,11 +518,17 @@ namespace OfflinePvP
             {
                 Combatant c = new Combatant
                 {
-                    Name = BotNames.Make(rng, combatants.Select(x => x.Name).ToList()),
+                    Name = Session.TakeJobName(TakenNames(), rng) ?? BotNames.Make(rng, TakenNames()),
                     IsAlly = allies,
-                    Team = cfg.Mode == MatchMode.TeamDeathmatch ? (allies ? 0 : 1) : nextTeamId++,
+                    Team = Teams ? (allies ? 0 : 1) : nextTeamId++,
                 };
                 combatants.Add(c);
+                if (Lts && roundLive)
+                {
+                    c.RespawnAt = int.MaxValue; // Last Team Standing: joins at the next round
+                    AddFeed(string.Format("{0} joined (next round).", Colored(c)));
+                    continue;
+                }
                 SpawnBot(c);
                 AddFeed(string.Format("{0} joined.", Colored(c)));
             }
@@ -549,7 +619,7 @@ namespace OfflinePvP
             }
             c.Ped = null;
 
-            string[] pool = cfg.Mode == MatchMode.TeamDeathmatch ? (c.IsAlly ? AllyModels : EnemyModels) : FfaModels;
+            string[] pool = Teams ? (c.IsAlly ? AllyModels : EnemyModels) : FfaModels;
             Model model = LoadModel(pool);
             if (model == null)
             {
@@ -674,7 +744,7 @@ namespace OfflinePvP
 
         RelationshipGroup GroupFor(Combatant c)
         {
-            if (cfg.Mode == MatchMode.TeamDeathmatch) return c.IsAlly ? allyGroup : enemyGroup;
+            if (Teams) return c.IsAlly ? allyGroup : enemyGroup;
             return ffaGroups[c.Team % FfaGroupCount];
         }
 
@@ -779,6 +849,11 @@ namespace OfflinePvP
             if (bot.AppliedConfigVersion != configVersion) ApplyStats(bot);
 
             Ped ped = bot.Ped;
+            if (Koth)
+            {
+                ThinkHill(bot, now);
+                return;
+            }
             bool targetValid = bot.Target != null && bot.Target.Alive && bot.Target.Ped != null
                 && bot.Target.Ped.Exists() && bot.IsHostileTo(bot.Target);
             Combatant next = bot.Target;
@@ -832,7 +907,7 @@ namespace OfflinePvP
             victim.Alive = false;
             victim.Deaths++;
             victim.Streak = 0;
-            victim.RespawnAt = now + cfg.RespawnDelay * 1000;
+            victim.RespawnAt = Lts ? int.MaxValue : now + cfg.RespawnDelay * 1000; // LTS: out until the next round
             DeleteBlip(victim);
             if (victim.Ped != null && victim.Ped.Exists()) victim.Ped.ResetOpacity();
             victim.SpawnProtectUntil = 0;
@@ -853,7 +928,11 @@ namespace OfflinePvP
                     killer.Streak++;
                     AddFeed(string.Format("{0} killed {1}", Colored(killer), Colored(victim)));
                 }
-                if (killer.IsPlayer && !teamKill) OnPlayerKill(victim);
+                if (killer.IsPlayer && !teamKill)
+                {
+                    OnPlayerKill(victim);
+                    Progression.RecordKill();
+                }
             }
             else
             {
@@ -866,8 +945,9 @@ namespace OfflinePvP
 
             if (victim.IsPlayer)
             {
+                Progression.RecordDeath();
                 string by = killer != null && killer != victim ? "Killed by " + killer.Name : (penalty ? "Suicide: -1 kill" : "");
-                shard.Show("SHOW_SHARD_WASTED_MP_MESSAGE", "~r~WASTED", by, cfg.RespawnDelay * 1000);
+                shard.Show("SHOW_SHARD_WASTED_MP_MESSAGE", "~r~WASTED", by, Lts ? 3000 : cfg.RespawnDelay * 1000);
             }
             else
             {
@@ -876,6 +956,7 @@ namespace OfflinePvP
             }
 
             CheckKillLimit();
+            CheckRoundEnd();
         }
 
         void OnPlayerKill(Combatant victim)
@@ -914,8 +995,14 @@ namespace OfflinePvP
 
         void CheckKillLimit()
         {
-            if (cfg.KillLimit <= 0 || state != State.Running) return;
-            if (cfg.Mode == MatchMode.TeamDeathmatch)
+            if (state != State.Running || Lts) return;
+            if (Koth)
+            {
+                if (combatants.Any(c => c.Points >= cfg.HillTarget)) EndMatch(false);
+                return;
+            }
+            if (cfg.KillLimit <= 0) return;
+            if (Teams)
             {
                 if (TeamScore(0) >= cfg.KillLimit || TeamScore(1) >= cfg.KillLimit) EndMatch(false);
             }
@@ -1110,39 +1197,21 @@ namespace OfflinePvP
 
         // ------------------------------------------------------------------ death system / world
 
+        const string DeathOwner = "deathmatch";
+
         static void KeepDeathSystemSuppressed()
         {
-            Function.Call(Hash.PAUSE_DEATH_ARREST_RESTART, true);
-            Function.Call(Hash.IGNORE_NEXT_RESTART, true);
-            Function.Call(Hash.SET_FADE_OUT_AFTER_DEATH, false);
+            DeathControl.KeepSuppressed();
         }
 
-        void RestoreDeathSystem(bool canWait)
+        static void RestoreDeathSystem(bool canWait)
         {
-            Function.Call(Hash.PAUSE_DEATH_ARREST_RESTART, false);
-            Function.Call(Hash.IGNORE_NEXT_RESTART, false);
-            Function.Call(Hash.SET_FADE_OUT_AFTER_DEATH, true);
-            int running = Function.Call<int>(Hash.GET_NUMBER_OF_THREADS_RUNNING_THE_SCRIPT_WITH_THIS_HASH, Game.GenerateHash("respawn_controller"));
-            if (running > 0) return;
-            Function.Call(Hash.REQUEST_SCRIPT, "respawn_controller");
-            int deadline = Game.GameTime + 3000;
-            while (canWait && !Function.Call<bool>(Hash.HAS_SCRIPT_LOADED, "respawn_controller") && Game.GameTime < deadline) Wait(0);
-            if (Function.Call<bool>(Hash.HAS_SCRIPT_LOADED, "respawn_controller"))
-            {
-                Function.Call(Hash.START_NEW_SCRIPT, "respawn_controller", 1424);
-                Function.Call(Hash.SET_SCRIPT_AS_NO_LONGER_NEEDED, "respawn_controller");
-            }
+            DeathControl.Release(DeathOwner, canWait);
         }
 
         static void ResurrectPlayer(Vector3 pos, float heading)
         {
-            Function.Call(Hash.NETWORK_RESURRECT_LOCAL_PLAYER, pos.X, pos.Y, pos.Z, heading, false, false, false, 0, 0);
-            Ped me = Game.Player.Character;
-            if (me.IsDead) me.Resurrect();
-            me.Task.ClearAllImmediately();
-            Function.Call(Hash.ANIMPOSTFX_STOP_ALL);
-            Game.TimeScale = 1f;
-            if (GTA.UI.Screen.IsFadedOut) GTA.UI.Screen.FadeIn(300);
+            DeathControl.Resurrect(pos, heading);
         }
 
         void SuppressWorld()
@@ -1226,7 +1295,12 @@ namespace OfflinePvP
                 time = string.Format("{0:00}:{1:00}", left / 60, left % 60);
             }
 
-            if (cfg.Mode == MatchMode.TeamDeathmatch)
+            if (Koth)
+            {
+                string kingText = hillContested ? "~o~CONTESTED" : (king == null ? "~c~Hill empty" : (king == player ? "~b~You are King" : "~r~King: " + king.Name));
+                Draw.Text(kingText, 640f, 60f, 0.5f, Color.White, GTA.UI.Alignment.Center);
+            }
+            if (Teams)
             {
                 Draw.Text(string.Format("~b~YOUR TEAM {0}", TeamScore(0)), right - w + 8f, y + 6f, 0.42f, Color.White, GTA.UI.Alignment.Left);
                 Draw.Text(string.Format("~r~ENEMY {0}", TeamScore(1)), right - 8f, y + 6f, 0.42f, Color.White, GTA.UI.Alignment.Right);
@@ -1237,19 +1311,31 @@ namespace OfflinePvP
                 int pos = ranked.IndexOf(player) + 1;
                 Draw.Text(string.Format("{0}{1} / {2}", pos, Ordinal(pos), ranked.Count), right - w + 8f, y + 6f, 0.42f, Gold, GTA.UI.Alignment.Left);
                 Combatant leader = ranked[0];
-                Draw.Text(string.Format("Leader: {0} ({1})", leader == player ? "You" : leader.Name, leader.Kills),
+                Draw.Text(string.Format("Leader: {0} ({1})", leader == player ? "You" : leader.Name, ScoreOf(leader)),
                     right - 8f, y + 10f, 0.3f, Color.White, GTA.UI.Alignment.Right);
             }
-            Draw.Text(string.Format("Kills {0}{1}   Deaths {2}", player.Kills, cfg.KillLimit > 0 ? " / " + cfg.KillLimit : "", player.Deaths),
-                right - w + 8f, y + 38f, 0.36f, Color.White, GTA.UI.Alignment.Left);
+            string line2;
+            if (Koth) line2 = string.Format("Points {0} / {1}   Kills {2}", player.Points, cfg.HillTarget, player.Kills);
+            else if (Lts) line2 = string.Format("Round {0}   First to {1}   K {2} D {3}", roundNo, cfg.RoundsToWin, player.Kills, player.Deaths);
+            else line2 = string.Format("Kills {0}{1}   Deaths {2}", player.Kills, cfg.KillLimit > 0 ? " / " + cfg.KillLimit : "", player.Deaths);
+            Draw.Text(line2, right - w + 8f, y + 38f, 0.36f, Color.White, GTA.UI.Alignment.Left);
             Draw.Text("Time  " + time, right - w + 8f, y + 64f, 0.36f, Color.White, GTA.UI.Alignment.Left);
             Draw.Text(string.Format("Hold {0}: scores", cfg.ScoreboardKey), right - 8f, y + 66f, 0.28f,
                 Color.FromArgb(255, 180, 180, 180), GTA.UI.Alignment.Right);
 
             if (state == State.Running && !player.Alive)
             {
-                int s = Math.Max(0, (player.RespawnAt - now) / 1000 + 1);
-                Draw.Text(string.Format("Respawning in {0}", s), 640f, 600f, 0.6f, Color.White, GTA.UI.Alignment.Center);
+                string msg;
+                if (Lts)
+                {
+                    int alive = combatants.Count(c => c.Team == 0 && c.Alive);
+                    msg = nextRoundAt != 0 ? "Next round starting..." : string.Format("Eliminated. {0} teammate{1} still alive", alive, alive == 1 ? "" : "s");
+                }
+                else
+                {
+                    msg = string.Format("Respawning in {0}", Math.Max(0, (player.RespawnAt - now) / 1000 + 1));
+                }
+                Draw.Text(msg, 640f, 600f, 0.6f, Color.White, GTA.UI.Alignment.Center);
             }
         }
 
@@ -1269,7 +1355,7 @@ namespace OfflinePvP
             const float w = 560f, x = 640f - w / 2f, rowH = 22f;
             float y = 90f;
             Draw.Rect(x, y, w, 34f, Color.FromArgb(230, 180, 20, 30));
-            string head = state == State.Ended ? "RESULTS" : (cfg.Mode == MatchMode.TeamDeathmatch ? "TEAM DEATHMATCH" : "DEATHMATCH");
+            string head = state == State.Ended ? "RESULTS" : DmConfig.ModeNames[(int)cfg.Mode].ToUpperInvariant();
             Draw.Text(head, 640f, y + 3f, 0.6f, Color.White, GTA.UI.Alignment.Center, GTA.UI.Font.Pricedown);
             y += 34f;
             if (state == State.Ended && resultLine != null)
@@ -1279,7 +1365,7 @@ namespace OfflinePvP
                 y += rowH;
             }
 
-            if (cfg.Mode == MatchMode.TeamDeathmatch)
+            if (Teams)
             {
                 y = DrawTeamRows(y, 0, string.Format("YOUR TEAM  {0}", TeamScore(0)), Blue, x, w, rowH);
                 y = DrawTeamRows(y + 4f, 1, string.Format("ENEMY TEAM  {0}", TeamScore(1)), Red, x, w, rowH);
@@ -1305,15 +1391,15 @@ namespace OfflinePvP
             return y;
         }
 
-        static void DrawRowHeader(float x, float y, float w, float rowH)
+        void DrawRowHeader(float x, float y, float w, float rowH)
         {
             Color grey = Color.FromArgb(255, 170, 170, 170);
             Draw.Rect(x, y, w, rowH, Color.FromArgb(220, 0, 0, 0));
             Draw.Text("#", x + 10f, y + 3f, 0.28f, grey, GTA.UI.Alignment.Left);
             Draw.Text("PLAYER", x + 40f, y + 3f, 0.28f, grey, GTA.UI.Alignment.Left);
-            Draw.Text("KILLS", x + w - 170f, y + 3f, 0.28f, grey, GTA.UI.Alignment.Right);
-            Draw.Text("DEATHS", x + w - 95f, y + 3f, 0.28f, grey, GTA.UI.Alignment.Right);
-            Draw.Text("K/D", x + w - 15f, y + 3f, 0.28f, grey, GTA.UI.Alignment.Right);
+            Draw.Text(Koth ? "POINTS" : "KILLS", x + w - 170f, y + 3f, 0.28f, grey, GTA.UI.Alignment.Right);
+            Draw.Text(Koth ? "KILLS" : "DEATHS", x + w - 95f, y + 3f, 0.28f, grey, GTA.UI.Alignment.Right);
+            Draw.Text(Koth ? "DEATHS" : "K/D", x + w - 15f, y + 3f, 0.28f, grey, GTA.UI.Alignment.Right);
         }
 
         float DrawRow(Combatant c, int pos, float x, float y, float w, float rowH)
@@ -1324,28 +1410,164 @@ namespace OfflinePvP
             string kd = (c.Deaths == 0 ? (float)c.Kills : (float)c.Kills / c.Deaths).ToString("0.00");
             Draw.Text(pos.ToString(), x + 10f, y + 2f, 0.32f, fg, GTA.UI.Alignment.Left);
             Draw.Text(me ? Game.Player.Name : c.Name, x + 40f, y + 2f, 0.32f, fg, GTA.UI.Alignment.Left);
-            Draw.Text(c.Kills.ToString(), x + w - 170f, y + 2f, 0.32f, fg, GTA.UI.Alignment.Right);
-            Draw.Text(c.Deaths.ToString(), x + w - 95f, y + 2f, 0.32f, fg, GTA.UI.Alignment.Right);
-            Draw.Text(kd, x + w - 15f, y + 2f, 0.32f, fg, GTA.UI.Alignment.Right);
+            Draw.Text((Koth ? c.Points : c.Kills).ToString(), x + w - 170f, y + 2f, 0.32f, fg, GTA.UI.Alignment.Right);
+            Draw.Text((Koth ? c.Kills : c.Deaths).ToString(), x + w - 95f, y + 2f, 0.32f, fg, GTA.UI.Alignment.Right);
+            Draw.Text(Koth ? c.Deaths.ToString() : kd, x + w - 15f, y + 2f, 0.32f, fg, GTA.UI.Alignment.Right);
             return y + rowH;
+        }
+
+        // ------------------------------------------------------------------ Last Team Standing
+
+        void CheckRoundEnd()
+        {
+            if (!Lts || !roundLive || state != State.Running) return;
+            bool usAlive = combatants.Any(c => c.Team == 0 && c.Alive);
+            bool themAlive = combatants.Any(c => c.Team == 1 && c.Alive);
+            if (usAlive && themAlive) return;
+
+            roundLive = false;
+            int winner = usAlive ? 0 : (themAlive ? 1 : -1);
+            if (winner >= 0) roundWins[winner]++;
+            string title = winner == 0 ? "~b~ROUND WON" : (winner == 1 ? "~r~ROUND LOST" : "ROUND DRAW");
+            shard.Show("SHOW_SHARD_CENTERED_MP_MESSAGE", title,
+                string.Format("Your team {0} - {1} Enemy team", roundWins[0], roundWins[1]), 4000);
+            if (winner >= 0 && roundWins[winner] >= cfg.RoundsToWin)
+            {
+                EndMatch(false);
+                return;
+            }
+            nextRoundAt = Game.GameTime + 5000;
+        }
+
+        void StartRound()
+        {
+            nextRoundAt = 0;
+            roundNo++;
+            foreach (Combatant c in combatants.ToArray())
+            {
+                if (c.IsPlayer) continue;
+                if (c.PendingRemoval) RemoveBot(c);
+                else SpawnBot(c); // replaces a living ped too, so everyone starts fresh
+            }
+            if (Game.Player.Character.IsDead) ResurrectPlayer(PickSpawn(player), (float)rng.Next(360));
+            PlacePlayer();
+            roundLive = true;
+            shard.Show("SHOW_SHARD_CENTERED_MP_MESSAGE", "ROUND " + roundNo,
+                string.Format("Your team {0} - {1} Enemy team", roundWins[0], roundWins[1]), 2500);
+        }
+
+        // ------------------------------------------------------------------ King of the Hill
+
+        void SetupHill()
+        {
+            hill = spawns.OrderBy(p => Flat(p, center)).First();
+            hillBlip = World.CreateBlip(hill, HillRadius);
+            hillBlip.Color = BlipColor.Yellow;
+            hillBlip.Alpha = 140;
+            nextHillTick = Game.GameTime + 1000;
+        }
+
+        bool InHill(Vector3 pos)
+        {
+            return Flat(pos, hill) <= HillRadius && Math.Abs(pos.Z - hill.Z) < 6f;
+        }
+
+        /// <summary>Once a second: a sole occupant is King and scores; two or more contest it.</summary>
+        void UpdateHill()
+        {
+            List<Combatant> inside = combatants.Where(c => c.Alive && c.Ped != null && c.Ped.Exists() && !c.Ped.IsDead && InHill(c.Ped.Position)).ToList();
+            Combatant newKing = inside.Count == 1 ? inside[0] : null;
+            hillContested = inside.Count > 1;
+            if (newKing != null && newKing != king)
+            {
+                AddFeed(string.Format("{0} {1} the hill.", Colored(newKing), newKing.IsPlayer ? "take" : "takes"));
+                if (newKing.IsPlayer) Audio.PlaySoundFrontend("CHECKPOINT_PERFECT", "HUD_MINI_GAME_SOUNDSET");
+            }
+            king = newKing;
+            if (king != null) king.Points++;
+            CheckKillLimit();
+        }
+
+        void DrawHill()
+        {
+            Color c = hillContested ? Color.FromArgb(110, 255, 140, 0)
+                : (king == null ? Color.FromArgb(80, 255, 255, 255) : (king == player ? Color.FromArgb(110, 93, 182, 229) : Color.FromArgb(110, 224, 50, 50)));
+            World.DrawMarker(MarkerType.VerticalCylinder, hill - new Vector3(0f, 0f, 1f), Vector3.Zero, Vector3.Zero,
+                new Vector3(HillRadius * 2f, HillRadius * 2f, 2f), c, false, false, false, null, null, false);
+            if (hillBlip != null && hillBlip.Exists())
+                hillBlip.Color = hillContested ? BlipColor.Orange : (king == null ? BlipColor.Yellow : (king == player ? BlipColor.Blue : BlipColor.Red));
+        }
+
+        /// <summary>Bots fight anyone close, otherwise push onto the hill and hold it.</summary>
+        void ThinkHill(Combatant bot, int now)
+        {
+            Ped ped = bot.Ped;
+            Combatant near = null;
+            float best = 30f;
+            foreach (Combatant c in combatants)
+            {
+                if (!c.Alive || !bot.IsHostileTo(c) || c.Ped == null || !c.Ped.Exists()) continue;
+                float d = c.Ped.Position.DistanceTo(ped.Position);
+                if (InHill(c.Ped.Position)) d -= 15f; // whoever holds the hill is the priority
+                if (d < best)
+                {
+                    best = d;
+                    near = c;
+                }
+            }
+            if (near != null)
+            {
+                if (near != bot.Target || !Function.Call<bool>(Hash.IS_PED_IN_COMBAT, ped, 0)) ped.Task.FightAgainst(near.Ped);
+                bot.Target = near;
+                bot.HeadingToHill = false;
+            }
+            else if (!InHill(ped.Position))
+            {
+                if (!bot.HeadingToHill)
+                {
+                    ped.Task.RunTo(hill + new Vector3(rng.Next(-6, 6), rng.Next(-6, 6), 0f));
+                    bot.HeadingToHill = true;
+                }
+                bot.Target = null;
+            }
+            else
+            {
+                if (bot.HeadingToHill || bot.Target != null) ped.Task.FightAgainstHatedTargets(60f);
+                bot.HeadingToHill = false;
+                bot.Target = null;
+            }
+            bot.VisibleToPlayer = Function.Call<bool>(Hash.HAS_ENTITY_CLEAR_LOS_TO_ENTITY, Game.Player.Character, ped, 17);
         }
 
         // ------------------------------------------------------------------ helpers
 
         List<Combatant> Ranked()
         {
-            return combatants.OrderByDescending(c => c.Kills).ThenBy(c => c.Deaths).ThenBy(c => c.IsPlayer ? 0 : 1).ToList();
+            return combatants.OrderByDescending(ScoreOf).ThenBy(c => c.Deaths).ThenBy(c => c.IsPlayer ? 0 : 1).ToList();
+        }
+
+        int ScoreOf(Combatant c)
+        {
+            return Koth ? c.Points : c.Kills;
+        }
+
+        string ScoreUnit { get { return Koth ? "points" : "kills"; } }
+
+        List<string> TakenNames()
+        {
+            return combatants.Select(x => x.Name).ToList();
         }
 
         int TeamScore(int team)
         {
+            if (Lts) return roundWins[team];
             return combatants.Where(c => c.Team == team).Sum(c => c.Kills);
         }
 
         string Colored(Combatant c)
         {
             if (c.IsPlayer) return "~y~You~s~";
-            if (cfg.Mode == MatchMode.TeamDeathmatch) return (c.IsAlly ? "~b~" : "~r~") + c.Name + "~s~";
+            if (Teams) return (c.IsAlly ? "~b~" : "~r~") + c.Name + "~s~";
             return "~r~" + c.Name + "~s~";
         }
 

@@ -47,11 +47,44 @@ namespace OfflinePvP
         const float X = 30f, Y = 50f, W = 400f, HeaderH = 46f, RowH = 25f;
         const int MaxVisible = 18; // rows that fit in 720 px with the header and help box; the rest scroll
 
+        /// <summary>The one menu that has focus, across all scripts (they share this assembly), so keys never drive two menus.</summary>
+        static SimpleMenu current;
+
         public string Title;
         public string Subtitle;
+        public string DisabledHelp = "Locked while a match is running.";
+        public SimpleMenu Parent;       // Backspace returns here
         public readonly List<MenuItem> Items = new List<MenuItem>();
-        public bool Visible;
         int index, first;
+        bool visible;
+
+        public bool Visible
+        {
+            get { return visible; }
+            set
+            {
+                visible = value;
+                if (value)
+                {
+                    if (current != null && current != this) current.visible = false;
+                    current = this;
+                }
+                else if (current == this)
+                {
+                    current = null;
+                }
+            }
+        }
+
+        /// <summary>Adds an item that opens <paramref name="child"/> as a submenu.</summary>
+        public MenuItem AddSubmenu(string label, string help, SimpleMenu child)
+        {
+            child.Parent = this;
+            MenuItem it = new MenuItem { Label = label, Help = help, Activate = delegate { child.Visible = true; } };
+            it.Value = delegate { return ">>"; };
+            Items.Add(it);
+            return it;
+        }
 
         public SimpleMenu(string title)
         {
@@ -122,7 +155,7 @@ namespace OfflinePvP
             {
                 y += 4f;
                 Draw.Rect(X, y, W, RowH + 4f, Color.FromArgb(200, 0, 0, 0));
-                Draw.Text(cur.IsEnabled ? cur.Help : "Locked while a match is running.", X + 8f, y + 4f, 0.3f, Color.White, GTA.UI.Alignment.Left);
+                Draw.Text(cur.IsEnabled ? cur.Help : DisabledHelp, X + 8f, y + 4f, 0.3f, Color.White, GTA.UI.Alignment.Left);
             }
         }
 
@@ -158,6 +191,7 @@ namespace OfflinePvP
                 case Keys.Back:
                 case Keys.NumPad0:
                     Visible = false;
+                    if (Parent != null) Parent.Visible = true;
                     Sound("BACK");
                     return true;
             }

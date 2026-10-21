@@ -19,6 +19,8 @@ namespace OfflinePvP
         public bool Alive;
         public int RespawnAt;        // Game.GameTime when a dead bot/player respawns
         public int Kills, Deaths, Streak;
+        public int Points;           // King of the Hill: seconds held the hill alone
+        public bool HeadingToHill;
         public int NextThink;
         public int AppliedConfigVersion = -1;
         public Combatant Target;

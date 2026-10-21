@@ -17,14 +17,16 @@ $output = & $csc /nologo /target:library /platform:x64 /optimize+ "/out:$dll" "/
     $sources
 $output | ForEach-Object { Write-Host $_ }
 if ($LASTEXITCODE -ne 0) { throw "Build failed" }
-Copy-Item (Join-Path $PSScriptRoot 'dist\OfflinePvP.ini') $out -Force
+Copy-Item (Join-Path $PSScriptRoot 'dist\*.ini') $out -Force
 Write-Host "Built $dll"
 
 if ($GtaDir) {
     $scripts = Join-Path $GtaDir 'scripts'
     New-Item -ItemType Directory -Force $scripts | Out-Null
     Copy-Item $dll $scripts -Force
-    $ini = Join-Path $scripts 'OfflinePvP.ini'
-    if (-not (Test-Path $ini)) { Copy-Item (Join-Path $out 'OfflinePvP.ini') $scripts }  # never overwrite user settings
+    foreach ($ini in Get-ChildItem $out -Filter *.ini) {
+        $target = Join-Path $scripts $ini.Name
+        if (-not (Test-Path $target)) { Copy-Item $ini.FullName $scripts }  # never overwrite user settings
+    }
     Write-Host "Installed to $scripts"
 }

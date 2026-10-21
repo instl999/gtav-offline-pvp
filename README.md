@@ -1,16 +1,29 @@
 # GTA V Offline PvP
 
-GTA Online-style competitive modes against AI bots in **GTA V story mode**. The long-term goal is a faithful
-recreation of Online's Deathmatch, then more Online PvP modes and CEO/organisation gameplay.
+The GTA Online experience in **GTA V story mode**: a freemode session full of AI players, and Online's PvP jobs
+against AI bots. The long-term goal is to recreate as much of Online as a single-player script can, including
+CEO/organisation gameplay.
 
-> **Status: early alpha (v0.1).** Free-for-all and Team Deathmatch are implemented and compile against
-> ScriptHookVDotNet 3.6.0, but **they have not been play-tested in-game yet**. Bug reports with your
-> `ScriptHookVDotNet.log` are very welcome.
+> **Status: alpha (v0.2).** Everything compiles against ScriptHookVDotNet 3.6.0, but **none of it has been
+> play-tested in-game yet**. Bug reports with your `ScriptHookVDotNet.log` are very welcome.
 
 Inspired by single-player "online PvP" mods for Red Dead Redemption 2.
 
-## Features (v0.1)
-- **Free-for-all** (everyone hostile) and **Team Deathmatch** (you + allied bots vs an enemy team).
+## Features
+### Online session (freemode), interaction menu (M)
+- **AI players in your world**: 1–29 players with gamertags, ranks and crew tags who drive and walk around the map,
+  show up as blips, and join and leave the session.
+- **Griefers and bounties**: some players come after you (adjustable), shooting someone makes them fight back,
+  and bounties go out on you and on them.
+- **Online-style respawn** near where you died instead of the hospital, plus a **player list** (hold Z).
+- **Interaction menu**: snacks, 5 tiers of body armor, passive mode, kill yourself, jobs, your profile.
+- **RP and rank** that persist, with the RP bar and RANK UP shard. Jobs pay RP and cash.
+
+Turn the session on from **M > Online session > Session**.
+
+### Jobs (F7, or M > Jobs)
+- **Deathmatch**, **Team Deathmatch**, **Last Team Standing** (rounds, no respawns) and **King of the Hill**
+  (hold the hill alone to score) against AI bots. Players from your session join your job.
 - **Live tuning from the F7 menu, mid-match:** enemy/ally bot count (bots join and leave like real players),
   difficulty preset (combat skill, fire rate, health/armor, cover use), accuracy %, how often bots hunt *you*,
   weapon set, kill limit, time limit, respawn delay, radar blips, name tags, health bars, pickups and their respawn time,
@@ -30,18 +43,19 @@ See [ROADMAP.md](ROADMAP.md) for the Online parity checklist and the planned mod
 - **Story mode only.** Never take Script Hook mods into GTA Online.
 
 ## Install
-1. Download `OfflinePvP.dll` and `OfflinePvP.ini` from [Releases](../../releases).
-2. Put both in `<GTA V folder>\scripts\`.
-3. Load story mode and press **F7**.
+1. Download the zip from [Releases](../../releases).
+2. Put `OfflinePvP.dll` and the `.ini` files in `<GTA V folder>\scripts\`.
+3. Load story mode. Press **M** for the interaction menu or **F7** for jobs.
 
 ## Controls
 | Key | Action |
 |---|---|
-| F7 | Open/close menu (also works during a match) |
+| M | Interaction menu |
+| F7 | Jobs menu (also works during a match) |
 | Arrow keys / Numpad 8-2-4-6 | Navigate / change values |
 | Enter | Start/end match, save settings, close results |
 | Backspace | Close menu |
-| Hold Z | Scoreboard |
+| Hold Z | Scoreboard in a job, player list in freemode |
 
 You can rebind keys in `OfflinePvP.ini`.
 
@@ -56,7 +70,9 @@ Keep the code **C# 5 compatible**, because that is what the in-box compiler supp
 ### Source layout
 | File | Purpose |
 |---|---|
-| `src/DeathmatchScript.cs` | Match lifecycle, bot AI loop, death/respawn, HUD |
+| `src/DeathmatchScript.cs` | Jobs: match lifecycle, all PvP modes, bot AI loop, death/respawn, HUD |
+| `src/FreemodeScript.cs` | Online session: AI players, griefers, bounties, respawn, interaction menu |
+| `src/Shared.cs` | Death-flow control, session state shared by scripts, RP/rank/inventory persistence |
 | `src/Combatant.cs` | Participant model (player or bot, team, score), shared by future modes |
 | `src/DmConfig.cs` | Settings, arenas, loadouts, difficulty presets, INI load/save |
 | `src/UiKit.cs` | Dependency-free menu, text/rect drawing, big-message shards |

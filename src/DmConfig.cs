@@ -8,7 +8,9 @@ namespace OfflinePvP
     internal enum MatchMode
     {
         FreeForAll = 0,
-        TeamDeathmatch = 1
+        TeamDeathmatch = 1,
+        LastTeamStanding = 2,
+        KingOfTheHill = 3
     }
 
     internal sealed class ArenaPreset
@@ -105,7 +107,11 @@ namespace OfflinePvP
         public static readonly string[] WeatherIds = { null, "EXTRASUNNY", "CLEAR", "CLOUDS", "SMOG", "FOGGY", "OVERCAST",
             "RAIN", "THUNDER", "CLEARING", "SNOWLIGHT", "XMAS", "HALLOWEEN" };
 
+        public static readonly string[] ModeNames = { "Deathmatch", "Team Deathmatch", "Last Team Standing", "King of the Hill" };
+
         public MatchMode Mode = MatchMode.FreeForAll;
+        public int RoundsToWin = 3;      // live (Last Team Standing)
+        public int HillTarget = 120;     // live (King of the Hill), points = seconds held alone
         public int Arena = 0;
         public int ArenaRadius = 90;
         public int EnemyCount = 8;       // live
@@ -135,7 +141,9 @@ namespace OfflinePvP
 
         public void Load(ScriptSettings s)
         {
-            Mode = (MatchMode)Clamp(s.GetValue("Match", "Mode", (int)Mode), 0, 1);
+            Mode = (MatchMode)Clamp(s.GetValue("Match", "Mode", (int)Mode), 0, ModeNames.Length - 1);
+            RoundsToWin = Clamp(s.GetValue("Match", "RoundsToWin", RoundsToWin), 1, 10);
+            HillTarget = Clamp(s.GetValue("Match", "HillTargetScore", HillTarget), 30, 600);
             Arena = Clamp(s.GetValue("Match", "Arena", Arena), 0, Arenas.Length - 1);
             ArenaRadius = Clamp(s.GetValue("Match", "ArenaRadius", ArenaRadius), 40, 250);
             KillLimit = Clamp(s.GetValue("Match", "KillLimit", KillLimit), 0, 500);
@@ -168,6 +176,8 @@ namespace OfflinePvP
         public void Save(ScriptSettings s)
         {
             s.SetValue("Match", "Mode", (int)Mode);
+            s.SetValue("Match", "RoundsToWin", RoundsToWin);
+            s.SetValue("Match", "HillTargetScore", HillTarget);
             s.SetValue("Match", "Arena", Arena);
             s.SetValue("Match", "ArenaRadius", ArenaRadius);
             s.SetValue("Match", "KillLimit", KillLimit);
