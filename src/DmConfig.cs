@@ -97,6 +97,14 @@ namespace OfflinePvP
             new DifficultyProfile("Elite",  2, 2, 180, 250, 100, true,  65),
         };
 
+        // Index 0 of both lists means "leave the world as it is".
+        public static readonly string[] TimeNames = { "Current", "Morning", "Noon", "Afternoon", "Evening", "Night" };
+        public static readonly int[] TimeHours = { -1, 8, 12, 16, 19, 0 };
+        public static readonly string[] WeatherNames = { "Current", "Extra sunny", "Clear", "Cloudy", "Smog", "Foggy", "Overcast",
+            "Rain", "Thunder", "Clearing", "Light snow", "Snow (Xmas)", "Halloween" };
+        public static readonly string[] WeatherIds = { null, "EXTRASUNNY", "CLEAR", "CLOUDS", "SMOG", "FOGGY", "OVERCAST",
+            "RAIN", "THUNDER", "CLEARING", "SNOWLIGHT", "XMAS", "HALLOWEEN" };
+
         public MatchMode Mode = MatchMode.FreeForAll;
         public int Arena = 0;
         public int ArenaRadius = 90;
@@ -114,6 +122,12 @@ namespace OfflinePvP
         public bool ClearAmbient = true; // live
         public bool PlayerLoadout = true;
         public bool ReturnAfterMatch = true;
+        public bool Pickups = true;      // live
+        public int PickupRespawn = 30;   // live, seconds
+        public bool SuicidePenalty = true; // live: -1 kill for dying by your own hand or the world, like Online
+        public int TimeOfDay = 0;        // live, index into TimeNames
+        public int Weather = 0;          // live, index into WeatherNames
+        public bool HealthBars = true;   // live
         public Keys MenuKey = Keys.F7;
         public Keys ScoreboardKey = Keys.Z;
 
@@ -131,6 +145,11 @@ namespace OfflinePvP
             PlayerLoadout = s.GetValue("Match", "GivePlayerLoadout", PlayerLoadout);
             ReturnAfterMatch = s.GetValue("Match", "ReturnAfterMatch", ReturnAfterMatch);
             ClearAmbient = s.GetValue("Match", "ClearAmbient", ClearAmbient);
+            Pickups = s.GetValue("Match", "Pickups", Pickups);
+            PickupRespawn = Clamp(s.GetValue("Match", "PickupRespawnSeconds", PickupRespawn), 5, 120);
+            SuicidePenalty = s.GetValue("Match", "SuicidePenalty", SuicidePenalty);
+            TimeOfDay = Clamp(s.GetValue("Match", "TimeOfDay", TimeOfDay), 0, TimeNames.Length - 1);
+            Weather = Clamp(s.GetValue("Match", "Weather", Weather), 0, WeatherNames.Length - 1);
 
             EnemyCount = Clamp(s.GetValue("AI", "EnemyCount", EnemyCount), 1, 40);
             AllyCount = Clamp(s.GetValue("AI", "AllyCount", AllyCount), 0, 20);
@@ -140,6 +159,7 @@ namespace OfflinePvP
 
             Blips = s.GetValue("HUD", "Blips", Blips);
             NameTags = s.GetValue("HUD", "NameTags", NameTags);
+            HealthBars = s.GetValue("HUD", "HealthBars", HealthBars);
 
             MenuKey = ParseKey(s.GetValue("Keys", "Menu", MenuKey.ToString()), MenuKey);
             ScoreboardKey = ParseKey(s.GetValue("Keys", "Scoreboard", ScoreboardKey.ToString()), ScoreboardKey);
@@ -157,6 +177,11 @@ namespace OfflinePvP
             s.SetValue("Match", "GivePlayerLoadout", PlayerLoadout);
             s.SetValue("Match", "ReturnAfterMatch", ReturnAfterMatch);
             s.SetValue("Match", "ClearAmbient", ClearAmbient);
+            s.SetValue("Match", "Pickups", Pickups);
+            s.SetValue("Match", "PickupRespawnSeconds", PickupRespawn);
+            s.SetValue("Match", "SuicidePenalty", SuicidePenalty);
+            s.SetValue("Match", "TimeOfDay", TimeOfDay);
+            s.SetValue("Match", "Weather", Weather);
             s.SetValue("AI", "EnemyCount", EnemyCount);
             s.SetValue("AI", "AllyCount", AllyCount);
             s.SetValue("AI", "Difficulty", Difficulty);
@@ -164,6 +189,7 @@ namespace OfflinePvP
             s.SetValue("AI", "PlayerBias", PlayerBias);
             s.SetValue("HUD", "Blips", Blips);
             s.SetValue("HUD", "NameTags", NameTags);
+            s.SetValue("HUD", "HealthBars", HealthBars);
             s.SetValue("Keys", "Menu", MenuKey.ToString());
             s.SetValue("Keys", "Scoreboard", ScoreboardKey.ToString());
             s.Save();
