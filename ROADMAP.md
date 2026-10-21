@@ -43,7 +43,7 @@ for an item, please open an issue with corrections.
 | Killer cam / WASTED screen with killer name | 🟡 | WASTED shard with the killer's name; no killer cam or weapon icon |
 | Top-right leaderboard HUD | 🟡 | Layout approximates Online's |
 | Scoreboard with K/D | ✅ | |
-| Interaction menu: snacks and armor | ⬜ | |
+| Interaction menu: snacks and armor | ✅ | M key; 5 snacks and 5 armor tiers, restockable |
 | Out-of-bounds timer | ✅ | |
 | Suicide penalty | ✅ | -1 kill for any death with no killer (falls, own explosives, out of bounds); can be turned off |
 | Bot names above heads | ✅ | |
@@ -55,17 +55,52 @@ for an item, please open an issue with corrections.
 |---|---|---|
 | Winner/loser shard | ✅ | |
 | Results leaderboard | ✅ | |
-| RP and cash rewards | ⬜ | Could pay story-mode cash |
+| RP and cash rewards | ✅ | Persistent RP/rank and story-mode cash; amounts are this mod's, not Online's exact payouts |
 | Rematch / next job vote | ⬜ | |
 
-## More PvP modes (planned)
-These are listed roughly in priority order. All of them share the `Combatant`/team core.
-1. **Last Team Standing**: rounds with no respawns.
-2. **King of the Hill**: hold a zone to score.
-3. **Vehicle Deathmatch**
-4. **Capture**: GTA, Contend, Hold and Raid.
-5. **Adversary modes**, e.g. Hunting Pack, Slasher, Every Bullet Counts, Come Out to Play, Running Back.
-6. **Gun Game / arms race** (community favourite)
+## Freemode (Online session)
+| Online feature | Status | Notes |
+|---|---|---|
+| Other players in your session | ✅ | 1–29 AI players with gamertags, ranks and crew tags; virtual far away, real peds within ~180 m |
+| Players driving, walking, roaming the map | ✅ | Drive Online-favourite cars between points of interest |
+| Players joining and leaving | ✅ | "X joined." / "X left." churn |
+| Player blips and name tags | ✅ | White blips with heading; red when hostile; flashing with a bounty |
+| Player list | ✅ | Hold Z outside jobs |
+| Griefers | ✅ | Off/Low/Normal/High; they chase you down in cars and on foot |
+| Retaliation when you shoot someone | ✅ | |
+| Bounties on you and on other players | ✅ | Survive yours for the cash, or claim theirs |
+| Respawn near where you died | ✅ | Instead of the hospital; can be turned off |
+| No wanted level for killing players | 🟡 | Restores the wanted level from before the fight |
+| Passive mode | ✅ | No damage either way; your weapons are disabled |
+| Kill yourself | ✅ | Interaction menu |
+| RP, rank, RANK UP | ✅ | Persistent; ranks 100+ use Online's formula, below 100 an approximation |
+| Players join your jobs | ✅ | Deathmatch bots take names from your session |
+| AI players fighting each other | ⬜ | |
+| Players in aircraft, bikes doing stunts, Oppressors | ⬜ | |
+| Invites to jobs from AI players | ⬜ | |
+| Mental state, bad sport, reporting | ⬜ | |
+
+## PvP modes
+| Mode | Status | Notes |
+|---|---|---|
+| Deathmatch | ✅ | |
+| Team Deathmatch | ✅ | |
+| Last Team Standing | ✅ | Rounds, no respawns; late joiners wait for the next round. No spectator camera yet |
+| King of the Hill (free-for-all) | ✅ | One fixed hill; 1 point per second held alone; contested hills don't score |
+| Team King of the Hill, moving or vehicle hills | ⬜ | |
+| Vehicle Deathmatch | ⬜ | |
+| Capture: GTA, Contend, Hold, Raid | ⬜ | |
+| Adversary modes (Hunting Pack, Slasher, Every Bullet Counts, Come Out to Play, Running Back...) | ⬜ | |
+| Gun Game / arms race | ⬜ | Community favourite |
+
+## Online character and economy
+Ideas from CruelMaster's "Online Content in Singleplayer" mod, which covers this side of Online:
+- Freemode character (`mp_m/f_freemode_01`) with a character creator.
+- Clothing store and saved outfits.
+- Ammu-Nation with Online's weapon list and attachments.
+- Personal vehicle with a starter car, insurance and Mors Mutual, and calling it in.
+- AI friends and crew who appear in menus and join jobs as allies.
+- Content gated by DLC packs.
 
 ## CEO / organisations
 - Register as CEO and hire AI associates and bodyguards.
@@ -77,4 +112,6 @@ These are listed roughly in priority order. All of them share the `Combatant`/te
 ## Engineering
 - Split the mode logic out of `DeathmatchScript` into a mode interface, so new modes can be plugged in.
 - A map/spawn editor for hand-placed arenas, saved as XML/JSON.
-- CI build on GitHub Actions.
+- ~~CI build on GitHub Actions~~ (done: every push and PR is compiled against SHVDN 3.6.0 and SHVDN Enhanced,
+  and the DLL is binary-checked against both).
+- ~~GTA V Enhanced support~~ (done: same DLL, via SHVDN Enhanced).
