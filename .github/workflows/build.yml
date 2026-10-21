@@ -8,18 +8,32 @@ on:
 jobs:
   build:
     runs-on: windows-latest
+    defaults:
+      run:
+        shell: powershell  # Windows PowerShell 5.1 (.NET Framework): needed for reflection-only loading
     steps:
       - uses: actions/checkout@v4
 
-      - name: Fetch ScriptHookVDotNet 3.6.0 (reference only)
-        shell: pwsh
+      - name: Fetch script hook APIs (reference only)
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           Invoke-WebRequest https://github.com/scripthookvdotnet/scripthookvdotnet/releases/download/v3.6.0/ScriptHookVDotNet.zip -OutFile shvdn.zip
           Expand-Archive shvdn.zip -DestinationPath shvdn
+          gh release download v1.1.0.6 --repo Chiheb-Bacha/ScriptHookVDotNetEnhanced --dir shvdne-zip
+          Expand-Archive (Get-ChildItem shvdne-zip\*.zip).FullName -DestinationPath shvdne
 
-      - name: Build with the in-box .NET Framework compiler
-        shell: pwsh
+      - name: Source compiles against SHVDN Enhanced (GTA V Enhanced)
+        run: ./build.ps1 -ShvdnDll "$PWD/shvdne/ScriptHookVDotNet3.dll"
+
+      - name: Release build against SHVDN 3.6.0
         run: ./build.ps1 -ShvdnDll "$PWD/shvdn/ScriptHookVDotNet3.dll"
+
+      - name: Release DLL binds on Legacy SHVDN
+        run: ./tools/check-compat.ps1 -ModDll bin/OfflinePvP.dll -ShvdnDll "$PWD/shvdn/ScriptHookVDotNet3.dll"
+
+      - name: Release DLL binds on SHVDN Enhanced
+        run: ./tools/check-compat.ps1 -ModDll bin/OfflinePvP.dll -ShvdnDll "$PWD/shvdne/ScriptHookVDotNet3.dll"
 
       - uses: actions/upload-artifact@v4
         with:

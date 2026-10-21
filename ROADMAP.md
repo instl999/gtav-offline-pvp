@@ -93,6 +93,15 @@ for an item, please open an issue with corrections.
 | Adversary modes (Hunting Pack, Slasher, Every Bullet Counts, Come Out to Play, Running Back...) | ⬜ | |
 | Gun Game / arms race | ⬜ | Community favourite |
 
+## Online character and economy
+Ideas from CruelMaster's "Online Content in Singleplayer" mod, which covers this side of Online:
+- Freemode character (`mp_m/f_freemode_01`) with a character creator.
+- Clothing store and saved outfits.
+- Ammu-Nation with Online's weapon list and attachments.
+- Personal vehicle with a starter car, insurance and Mors Mutual, and calling it in.
+- AI friends and crew who appear in menus and join jobs as allies.
+- Content gated by DLC packs.
+
 ## CEO / organisations
 - Register as CEO and hire AI associates and bodyguards.
 - Give associates orders: follow, guard, attack my target, hold position.
@@ -103,4 +112,6 @@ for an item, please open an issue with corrections.
 ## Engineering
 - Split the mode logic out of `DeathmatchScript` into a mode interface, so new modes can be plugged in.
 - A map/spawn editor for hand-placed arenas, saved as XML/JSON.
-- ~~CI build on GitHub Actions~~ (done: every push and PR is compiled).
+- ~~CI build on GitHub Actions~~ (done: every push and PR is compiled against SHVDN 3.6.0 and SHVDN Enhanced,
+  and the DLL is binary-checked against both).
+- ~~GTA V Enhanced support~~ (done: same DLL, via SHVDN Enhanced).

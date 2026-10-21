@@ -38,14 +38,34 @@ Turn the session on from **M > Online session > Session**.
 See [ROADMAP.md](ROADMAP.md) for the Online parity checklist and the planned modes.
 
 ## Requirements
-- [Script Hook V](http://www.dev-c.com/gtav/scripthookv/) (matching your game build)
-- [ScriptHookVDotNet v3](https://github.com/scripthookvdotnet/scripthookvdotnet/releases) (3.6.0 or newer)
-- **Story mode only.** Never take Script Hook mods into GTA Online.
+The same `OfflinePvP.dll` works on both PC editions.
 
-## Install
-1. Download the zip from [Releases](../../releases).
-2. Put `OfflinePvP.dll` and the `.ini` files in `<GTA V folder>\scripts\`.
-3. Load story mode. Press **M** for the interaction menu or **F7** for jobs.
+| | GTA V **Enhanced** (`GTA5_Enhanced.exe`) | GTA V **Legacy** (`GTA5.exe`) |
+|---|---|---|
+| Script Hook V | [Script Hook V](http://www.dev-c.com/gtav/scripthookv/) with Enhanced support (v3889.0 covers Enhanced 1.0.1158.13) | [Script Hook V](http://www.dev-c.com/gtav/scripthookv/) matching your build |
+| .NET script hook | [ScriptHookVDotNet **Enhanced**](https://github.com/Chiheb-Bacha/ScriptHookVDotNetEnhanced/releases) v1.1.0.6+ (required: vanilla SHVDN does not run on Enhanced) | [ScriptHookVDotNet v3](https://github.com/scripthookvdotnet/scripthookvdotnet/releases) 3.6.0+, or SHVDN Enhanced |
+
+Both need .NET Framework 4.8 and the Visual C++ 2019 x64 redistributable.
+**Story mode only.** Never take Script Hook mods into GTA Online.
+
+## Install (Enhanced)
+1. Install Script Hook V: copy `ScriptHookV.dll` and `dinput8.dll` next to `GTA5_Enhanced.exe`.
+2. Install SHVDN Enhanced: copy `ScriptHookVDotNet.asi`, `ScriptHookVDotNet.ini`, `ScriptHookVDotNet2.dll`,
+   `ScriptHookVDotNet3.dll` and `MinHook.x64.dll` from the same release next to `GTA5_Enhanced.exe`.
+   Don't mix files from different SHVDN versions.
+3. Create a `scripts` folder there, and put `OfflinePvP.dll` and the `.ini` files from our
+   [Releases](../../releases) zip in it.
+4. **Turn off BattlEye for story mode.** Either untick BattlEye in the Rockstar Games Launcher settings, or add
+   `-nobattleye` to the launch options (Steam: Properties > Launch Options; Epic: Manage > Launch Options).
+   GTA Online won't be available until you turn it back on.
+5. Load story mode. Press **M** for the interaction menu or **F7** for jobs.
+
+If scripts don't load at all, check `ScriptHookVDotNet.log` next to the game exe. SHVDN Enhanced's page also
+recommends DirectStorageFix for Enhanced. After a game update, wait for both Script Hook V and SHVDN Enhanced
+to update before playing modded.
+
+## Install (Legacy)
+Same as above, using `GTA5.exe`'s folder and either SHVDN v3 or SHVDN Enhanced.
 
 ## Controls
 | Key | Action |
@@ -65,6 +85,13 @@ You only need the .NET Framework 4.x C# compiler that ships with Windows. No Vis
 .\build.ps1 -ShvdnDll "C:\path\to\ScriptHookVDotNet3.dll" -GtaDir "D:\Games\Grand Theft Auto V"
 ```
 `-GtaDir` is optional. It copies the DLL into `scripts\` and never overwrites an existing INI.
+
+Release builds are compiled against SHVDN 3.6.0 so one DLL runs everywhere. `tools\check-compat.ps1` proves that
+every type and member the DLL uses binds against a given `ScriptHookVDotNet3.dll` (CI runs it against both SHVDN
+3.6.0 and SHVDN Enhanced):
+```powershell
+.\tools\check-compat.ps1 -ModDll bin\OfflinePvP.dll -ShvdnDll "C:\path\to\ScriptHookVDotNet3.dll"
+```
 Keep the code **C# 5 compatible**, because that is what the in-box compiler supports.
 
 ### Source layout

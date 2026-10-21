@@ -12,7 +12,8 @@ New-Item -ItemType Directory -Force $out | Out-Null
 $dll = Join-Path $out 'OfflinePvP.dll'
 
 $sources = Get-ChildItem (Join-Path $PSScriptRoot 'src') -Filter *.cs | ForEach-Object { $_.FullName }
-$output = & $csc /nologo /target:library /platform:x64 /optimize+ "/out:$dll" "/reference:$ShvdnDll" `
+# 612/618: SHVDN Enhanced marks many v3 members obsolete; we keep using them so one DLL binds to SHVDN 3.6 and SHVDNE.
+$output = & $csc /nologo /target:library /platform:x64 /optimize+ /nowarn:612,618 "/out:$dll" "/reference:$ShvdnDll" `
     "/reference:$fw\System.Windows.Forms.dll" "/reference:$fw\System.Drawing.dll" "/reference:$fw\System.Core.dll" `
     $sources
 $output | ForEach-Object { Write-Host $_ }
