@@ -1,11 +1,11 @@
 # GTA V Offline PvP
 
-The GTA Online experience in **GTA V story mode**: a freemode session full of AI players, and Online's PvP jobs
-against AI bots. The long-term goal is to recreate as much of Online as a single-player script can, including
+The GTA Online experience in **GTA V story mode**: a freemode session full of AI players, an AI crew that plays
+alongside you, freemode events, races, and Online's PvP jobs against AI bots. The long-term goal is to recreate as much of Online as a single-player script can, including
 CEO/organisation gameplay.
 
-> **Status: alpha (v0.2).** Everything compiles against ScriptHookVDotNet 3.6.0, but **none of it has been
-> play-tested in-game yet**. Bug reports with your `ScriptHookVDotNet.log` are very welcome.
+> **Status: alpha (v0.3).** Everything compiles against ScriptHookVDotNet 3.6.0 and SHVDN Enhanced, but **none
+> of it has been play-tested in-game yet**. Bug reports with your `ScriptHookVDotNet.log` are very welcome.
 
 Inspired by single-player "online PvP" mods for Red Dead Redemption 2.
 
@@ -21,9 +21,29 @@ Inspired by single-player "online PvP" mods for Red Dead Redemption 2.
 
 Turn the session on from **M > Online session > Session**.
 
+### Crew and AI partners (M > Crew & partners)
+- **A crew that persists:** you start with 3 crew mates. Invite friendly players from your session, or recruit new
+  ones. Up to 8 members.
+- **Partners with you:** 1–4 crew mates follow you on foot and get into your car. When your car is full, they bring
+  their own and escort you.
+  - They fight griefers and anyone who attacks you.
+  - When killed, they respawn near you.
+  - When you fast-travel, they catch up.
+- **Orders:** follow me, hold position, attack my target.
+- **Team jobs:** your crew fill your side in team jobs, and they race against you.
+
+### Freemode events and a living session
+- **Freemode events** every 10/15/20 minutes, or on demand: **Checkpoints**, **Hot Property** and **King of the
+  Castle**.
+  - Every player in your session competes. Nearby players do it for real; far-away players score in the background.
+  - A gold/silver/bronze panel tracks the standings, and the top 3 get paid.
+- **AI players fight each other.** Crews stick together, and attacking one crew member brings the whole crew after you.
+- **Job invites:** players invite you to jobs. Press **Y** or use the interaction menu to join.
+
 ### Jobs (F7, or M > Jobs)
-- **Deathmatch**, **Team Deathmatch**, **Last Team Standing** (rounds, no respawns) and **King of the Hill**
-  (hold the hill alone to score) against AI bots. Players from your session join your job.
+- **Deathmatch**, **Team Deathmatch**, **Last Team Standing** (rounds, no respawns), **King of the Hill**
+  (hold the hill alone to score) and **Gun Game** (a new gun every kill, finish with the knife) against AI bots.
+  Players from your session join your job.
 - **Live tuning from the F7 menu, mid-match:** enemy/ally bot count (bots join and leave like real players),
   difficulty preset (combat skill, fire rate, health/armor, cover use), accuracy %, how often bots hunt *you*,
   weapon set, kill limit, time limit, respawn delay, radar blips, name tags, health bars, pickups and their respawn time,
@@ -36,6 +56,17 @@ Turn the session on from **M > Online session > Session**.
 - **Arenas:** where you're standing (adjustable radius) or 9 presets around the map.
 
 See [ROADMAP.md](ROADMAP.md) for the Online parity checklist and the planned modes.
+
+### Races (F7 > Races, or M > Races)
+- **Race types:** lap or point-to-point races against up to 15 AI drivers, on routes generated from the road network.
+  - Pick a length, one of 7 vehicle classes, and one of 10 start locations (or start where you are).
+- **Online flow:**
+  - Grid start and a 3-2-1-GO countdown.
+  - Yellow checkpoints, with a faded preview of the next one and GPS routing.
+  - Catch-up.
+  - **Hold F to respawn** at your last checkpoint.
+  - After the winner finishes, everyone else has 30 seconds before a DNF.
+  - Results with best laps, then RP and cash by position.
 
 ## Requirements
 The same `OfflinePvP.dll` works on both PC editions.
@@ -75,16 +106,25 @@ Same as above, using `GTA5.exe`'s folder and either SHVDN v3 or SHVDN Enhanced.
 | Arrow keys / Numpad 8-2-4-6 | Navigate / change values |
 | Enter | Start/end match, save settings, close results |
 | Backspace | Close menu |
-| Hold Z | Scoreboard in a job, player list in freemode |
+| Hold Z | Scoreboard in a job, standings in a race, player list in freemode |
+| Y | Accept a job invite |
+| Hold F (in a race) | Respawn at the last checkpoint |
 
 You can rebind keys in `OfflinePvP.ini`.
 
 ## Building
-You only need the .NET Framework 4.x C# compiler that ships with Windows. No Visual Studio required.
+On Windows you only need the .NET Framework 4.x C# compiler that ships with Windows. No Visual Studio required.
 ```powershell
 .\build.ps1 -ShvdnDll "C:\path\to\ScriptHookVDotNet3.dll" -GtaDir "D:\Games\Grand Theft Auto V"
 ```
 `-GtaDir` is optional. It copies the DLL into `scripts\` and never overwrites an existing INI.
+
+On any OS with the .NET SDK (macOS and Linux included):
+```bash
+dotnet build OfflinePvP.csproj -c Release -p:ShvdnDll=/path/to/ScriptHookVDotNet3.dll
+```
+See [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) for the architecture and the design of each feature, and
+[docs/RESEARCH.md](docs/RESEARCH.md) for the Online rules and natives behind them.
 
 Release builds are compiled against SHVDN 3.6.0 so one DLL runs everywhere. `tools\check-compat.ps1` proves that
 every type and member the DLL uses binds against a given `ScriptHookVDotNet3.dll` (CI runs it against both SHVDN
@@ -97,13 +137,17 @@ Keep the code **C# 5 compatible**, because that is what the in-box compiler supp
 ### Source layout
 | File | Purpose |
 |---|---|
-| `src/DeathmatchScript.cs` | Jobs: match lifecycle, all PvP modes, bot AI loop, death/respawn, HUD |
+| `src/DeathmatchScript.cs` | Jobs: match lifecycle, all PvP modes (incl. Gun Game), bot AI loop, death/respawn, HUD |
+| `src/RaceScript.cs` | Races: route generation, grid, AI drivers, checkpoints, catch-up, respawn, results |
+| `src/CrewScript.cs` | Crew roster and AI partners: follow, ride along, orders, respawn |
 | `src/FreemodeScript.cs` | Online session: AI players, griefers, bounties, respawn, interaction menu |
+| `src/FreemodeEvents.cs` | Freemode events, AI feuds and crews, job invites (part of `FreemodeScript`) |
 | `src/Shared.cs` | Death-flow control, session state shared by scripts, RP/rank/inventory persistence |
 | `src/Combatant.cs` | Participant model (player or bot, team, score), shared by future modes |
 | `src/DmConfig.cs` | Settings, arenas, loadouts, difficulty presets, INI load/save |
 | `src/UiKit.cs` | Dependency-free menu, text/rect drawing, big-message shards |
-| `dist/OfflinePvP.ini` | Default settings shipped with releases |
+| `dist/*.ini` | Default settings shipped with releases (jobs, freemode, crew, races) |
+| `OfflinePvP.csproj` | Cross-platform build with the .NET SDK |
 
 ## Contributing
 Issues and PRs are welcome, especially for:

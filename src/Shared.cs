@@ -82,11 +82,41 @@ namespace OfflinePvP
         /// <summary>Set by the interaction menu to ask the jobs script to open its menu.</summary>
         public static bool OpenJobsMenu;
 
+        /// <summary>Set by other menus to open the crew menu / races menu (each script opens its own on its next tick).</summary>
+        public static bool OpenCrewMenu, OpenRaceMenu;
+
+        /// <summary>
+        /// A job invite was accepted: the jobs script starts this mode (a <see cref="MatchMode"/>), or the race script
+        /// starts a race. -1 / false = nothing pending.
+        /// </summary>
+        public static int RequestedMatchMode = -1;
+        public static bool RequestedRace;
+
+        /// <summary>Your crew roster, kept in sync by the crew script. Crew mates fill your side in team jobs.</summary>
+        public static readonly List<string> CrewNames = new List<string>();
+
         /// <summary>Like Online, people in your session are the ones who join your job.</summary>
         public static string TakeJobName(ICollection<string> taken, Random rng)
         {
-            List<SessionPlayer> free = Players.Where(p => !taken.Contains(p.Name)).ToList();
+            List<SessionPlayer> free = Players.Where(p => !taken.Contains(p.Name) && !CrewNames.Contains(p.Name)).ToList();
             return free.Count > 0 ? free[rng.Next(free.Count)].Name : null;
+        }
+
+        /// <summary>A teammate's name: your crew first, then anyone in the session.</summary>
+        public static string TakeAllyName(ICollection<string> taken, Random rng)
+        {
+            List<string> crew = CrewNames.Where(n => !taken.Contains(n)).ToList();
+            return crew.Count > 0 ? crew[rng.Next(crew.Count)] : TakeJobName(taken, rng);
+        }
+
+        public static readonly string[] JobNames = { "Deathmatch", "Team Deathmatch", "Last Team Standing", "King of the Hill", "Gun Game", "Race" };
+
+        /// <summary>Starts a job from an invite. Index into <see cref="JobNames"/>; the last one is a race.</summary>
+        public static void RequestJob(int job)
+        {
+            if (MatchActive) return;
+            if (job >= JobNames.Length - 1) RequestedRace = true;
+            else RequestedMatchMode = job;
         }
 
         public static readonly string[] PlayerModels = {
@@ -105,6 +135,35 @@ namespace OfflinePvP
                 if (m.Request(1000)) return m;
             }
             return null;
+        }
+    }
+
+    /// <summary>
+    /// The player's story-mode weapons, put aside while a job (Gun Game) takes them away, and given back afterwards.
+    /// </summary>
+    internal sealed class WeaponStash
+    {
+        readonly List<KeyValuePair<WeaponHash, int>> weapons = new List<KeyValuePair<WeaponHash, int>>();
+        WeaponHash selected = WeaponHash.Unarmed;
+
+        public static WeaponStash Save(Ped ped)
+        {
+            WeaponStash s = new WeaponStash();
+            foreach (WeaponHash w in Enum.GetValues(typeof(WeaponHash)))
+            {
+                if (w == WeaponHash.Unarmed || !ped.Weapons.HasWeapon(w)) continue;
+                s.weapons.Add(new KeyValuePair<WeaponHash, int>(w, ped.Weapons[w].Ammo));
+            }
+            Weapon cur = ped.Weapons.Current;
+            if (cur != null) s.selected = cur.Hash;
+            return s;
+        }
+
+        public void Restore(Ped ped)
+        {
+            ped.Weapons.RemoveAll();
+            foreach (KeyValuePair<WeaponHash, int> kv in weapons) ped.Weapons.Give(kv.Key, Math.Max(1, kv.Value), false, true);
+            if (selected != WeaponHash.Unarmed && ped.Weapons.HasWeapon(selected)) ped.Weapons.Select(selected, true);
         }
     }
 

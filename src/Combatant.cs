@@ -20,6 +20,7 @@ namespace OfflinePvP
         public int RespawnAt;        // Game.GameTime when a dead bot/player respawns
         public int Kills, Deaths, Streak;
         public int Points;           // King of the Hill: seconds held the hill alone
+        public int Tier;             // Gun Game: index into DmConfig.GunGameLadder
         public bool HeadingToHill;
         public int NextThink;
         public int AppliedConfigVersion = -1;
