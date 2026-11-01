@@ -73,7 +73,8 @@ namespace OfflinePvP
         bool Lts { get { return cfg.Mode == MatchMode.LastTeamStanding; } }
         bool Koth { get { return cfg.Mode == MatchMode.KingOfTheHill; } }
         bool GunGame { get { return cfg.Mode == MatchMode.GunGame; } }
-        WeaponStash playerWeapons; // Gun Game takes your weapons; you get them back afterwards
+        WeaponStash playerWeapons; // Gun Game hands out its own guns; afterwards they go and your ammo is put back
+        bool starting;             // between claiming Session.MatchActive and the match running (Wait()s in between)
         RelationshipGroup[] ffaGroups;
         readonly List<PickupSpot> pickups = new List<PickupSpot>();
         int nextPickupCheck;
@@ -232,7 +233,7 @@ namespace OfflinePvP
                 return;
             }
             if (menu.HandleKey(e.KeyCode)) return;
-            if (state == State.Ended && e.KeyCode == Keys.Enter) endedAt = 0; // skip results screen
+            if (state == State.Ended && e.KeyCode == Keys.Enter && !SimpleMenu.AnyOpen) endedAt = 0; // skip results screen
         }
 
         // ------------------------------------------------------------------ main loop
@@ -334,6 +335,7 @@ namespace OfflinePvP
                 return;
             }
             Session.MatchActive = true; // freemode stands down; claimed before the fade so no other job starts meanwhile
+            starting = true;
 
             GTA.UI.Screen.FadeOut(500);
             Wait(600);
@@ -386,6 +388,7 @@ namespace OfflinePvP
             areaBlip.Alpha = 70;
 
             state = State.Running;
+            starting = false;
             int now = Game.GameTime;
             matchStart = now;
             nextRosterCheck = now;
@@ -490,11 +493,12 @@ namespace OfflinePvP
 
             Ped me = Game.Player.Character;
             if (me.IsDead) ResurrectPlayer(me.Position, me.Heading);
+            me.IsPositionFrozen = false;
             me.IsInvincible = false;
             me.ResetOpacity();
             if (playerWeapons != null)
             {
-                playerWeapons.Restore(me);
+                playerWeapons.Restore(me, DmConfig.GunGameLadder);
                 playerWeapons = null;
             }
 
@@ -517,7 +521,8 @@ namespace OfflinePvP
 
         void OnAborted(object sender, EventArgs e)
         {
-            if (state != State.Idle) Cleanup(true);
+            if (state != State.Idle || starting) Cleanup(true);
+            starting = false;
         }
 
         // ------------------------------------------------------------------ roster (live bot count)
@@ -793,6 +798,7 @@ namespace OfflinePvP
             if (player.Alive) UpdateSpawnProtection(player, now);
 
             Game.DisableControlThisFrame(Control.CharacterWheel);
+            if (GunGame && player.Alive) LockGunGameWeapon(me);
 
             if (player.Alive && me.IsDead)
             {
@@ -1599,10 +1605,29 @@ namespace OfflinePvP
         {
             Ped ped = c.IsPlayer ? Game.Player.Character : c.Ped;
             if (ped == null || !ped.Exists() || ped.IsDead) return;
-            int tier = Math.Min(c.Tier, DmConfig.GunGameLadder.Length - 1);
-            ped.Weapons.RemoveAll();
-            ped.Weapons.Give(DmConfig.GunGameLadder[tier], 9999, true, true);
-            ped.Weapons.Select(DmConfig.GunGameLadder[tier], true);
+            WeaponHash w = DmConfig.GunGameLadder[Math.Min(c.Tier, DmConfig.GunGameLadder.Length - 1)];
+            if (!c.IsPlayer) ped.Weapons.RemoveAll(); // the player's story weapons stay; LockGunGameWeapon keeps them holstered
+            if (!ped.Weapons.HasWeapon(w) || ped.Weapons[w].Ammo < 500) ped.Weapons.Give(w, 9999, true, true);
+            ped.Weapons.Select(w, true);
+        }
+
+        /// <summary>Gun Game: you may only hold the gun for your level. Weapon selection is blocked and enforced.</summary>
+        void LockGunGameWeapon(Ped me)
+        {
+            foreach (Control c in new[] { Control.SelectWeapon, Control.WeaponWheelNext, Control.WeaponWheelPrev, Control.WeaponWheelUpDown,
+                Control.WeaponWheelLeftRight, Control.SelectNextWeapon, Control.SelectPrevWeapon, Control.NextWeapon, Control.PrevWeapon,
+                Control.SelectWeaponUnarmed, Control.SelectWeaponMelee, Control.SelectWeaponHandgun, Control.SelectWeaponShotgun,
+                Control.SelectWeaponSmg, Control.SelectWeaponAutoRifle, Control.SelectWeaponSniper, Control.SelectWeaponHeavy,
+                Control.SelectWeaponSpecial })
+                Game.DisableControlThisFrame(c);
+            if (me.IsDead) return;
+            WeaponHash w = DmConfig.GunGameLadder[Math.Min(player.Tier, DmConfig.GunGameLadder.Length - 1)];
+            Weapon cur = me.Weapons.Current;
+            if (cur == null || cur.Hash != w)
+            {
+                if (!me.Weapons.HasWeapon(w)) me.Weapons.Give(w, 9999, true, true);
+                me.Weapons.Select(w, true);
+            }
         }
 
         void Promote(Combatant c)

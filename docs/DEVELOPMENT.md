@@ -99,7 +99,8 @@ Shared code (Shared.cs, UiKit.cs, Combatant.cs, DmConfig.cs):
 - Being knifed, or dying with no killer (when the suicide penalty is on), moves you one step down.
 
 **How it works**
-- Your story weapons are stashed at the start (`WeaponStash`) and restored when the match is cleaned up.
+- Your story weapons are never removed, so attachments and tints survive. Weapon selection is locked to your
+  level's gun. Afterwards, `WeaponStash` removes the ladder guns you didn't own and sets your ammo back.
 - Weapon pickups turn into armor pickups.
 - The HUD shows your level and current weapon; the scoreboard shows LEVEL, KILLS, DEATHS.
 

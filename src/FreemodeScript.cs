@@ -349,6 +349,7 @@ namespace OfflinePvP
             if (on)
             {
                 foreach (SessionPlayer p in Players) SetHostile(p, false, 0);
+                OnEventPlayerGone(null, Game.Player.Character.Position); // passive players can't hold event objectives
                 GTA.UI.Notification.Show("Passive mode ~g~enabled~s~.");
             }
             else
@@ -473,6 +474,8 @@ namespace OfflinePvP
 
         void SyncRoster(bool silent)
         {
+            // Someone who joined your crew plays with you as a partner now; their session copy quietly goes once out of sight.
+            foreach (SessionPlayer c in Players.Where(p => !p.Materialized && Session.CrewNames.Contains(p.Name)).ToList()) Remove(c);
             if (Players.Count < cfg.Players) Join(silent || Players.Count < cfg.Players - 3);
             while (silent && Players.Count < cfg.Players) Join(true);
             if (Players.Count > cfg.Players)
@@ -486,7 +489,7 @@ namespace OfflinePvP
         {
             SessionPlayer p = new SessionPlayer
             {
-                Name = BotNames.Make(rng, Players.Select(x => x.Name).ToList()),
+                Name = BotNames.Make(rng, Players.Select(x => x.Name).Concat(Session.CrewNames).ToList()),
                 Rank = 1 + (int)(Math.Pow(rng.NextDouble(), 2.5) * 650),
                 Crew = rng.Next(100) < 30 ? CrewWords[rng.Next(CrewWords.Length)] : null,
                 Driving = rng.Next(100) < 70,
@@ -727,6 +730,10 @@ namespace OfflinePvP
             Ped me = Game.Player.Character;
             Function.Call(Hash.SET_ENTITY_CAN_BE_DAMAGED_BY_RELATIONSHIP_GROUP, me, !immune, neutralGroup.Hash);
             Function.Call(Hash.SET_ENTITY_CAN_BE_DAMAGED_BY_RELATIONSHIP_GROUP, me, !immune, hostileGroup.Hash);
+            foreach (RelationshipGroup g in new[] { feudA, feudB })
+            {
+                if ((object)g != null && g.Hash != 0) Function.Call(Hash.SET_ENTITY_CAN_BE_DAMAGED_BY_RELATIONSHIP_GROUP, me, !immune, g.Hash);
+            }
         }
 
         // ------------------------------------------------------------------ AI behaviour
@@ -856,7 +863,15 @@ namespace OfflinePvP
             else
             {
                 SessionPlayer other = killer == null ? null : Players.FirstOrDefault(o => o.Ped != null && o.Ped.Handle == killer.Handle);
-                if (other != null)
+                string crewMate;
+                if (other == null && killer != null && Session.CrewPeds.TryGetValue(killer.Handle, out crewMate))
+                {
+                    int had;
+                    Session.CrewKillsPending.TryGetValue(crewMate, out had);
+                    Session.CrewKillsPending[crewMate] = had + 1;
+                    GTA.UI.Notification.Show(string.Format("Your crew mate ~b~{0}~s~ killed ~r~{1}~s~.", crewMate, p.Name));
+                }
+                else if (other != null)
                 {
                     other.Kills++;
                     GTA.UI.Notification.Show(string.Format("~b~{0}~s~ killed ~b~{1}~s~.", other.Name, p.Name));

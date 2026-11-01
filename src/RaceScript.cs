@@ -158,6 +158,8 @@ namespace OfflinePvP
         TimeSpan savedTime;
         Weather savedWeather;
         bool savedClockPaused, envChanged;
+        bool starting;              // MatchActive claimed, still fading/streaming (Wait()s in between)
+        float startHeading;         // road heading at the start node
 
         public RaceScript()
         {
@@ -168,7 +170,7 @@ namespace OfflinePvP
             BuildMenu();
             Tick += OnTick;
             KeyDown += OnKeyDown;
-            Aborted += delegate { if (state != State.Idle) Cleanup(true); };
+            Aborted += delegate { if (state != State.Idle || starting) Cleanup(true); starting = false; };
             Interval = 0;
         }
 
@@ -243,7 +245,7 @@ namespace OfflinePvP
         void OnKeyDown(object sender, KeyEventArgs e)
         {
             if (menu.HandleKey(e.KeyCode)) return;
-            if (e.KeyCode == Keys.Enter)
+            if (e.KeyCode == Keys.Enter && !SimpleMenu.AnyOpen)
             {
                 if (state == State.Results) endedAt = 0;                       // close results
                 else if (state == State.Racing && player != null && player.Finished) finishDeadline = 0; // skip the wait
@@ -329,6 +331,7 @@ namespace OfflinePvP
                 return;
             }
             Session.MatchActive = true;
+            starting = true;
             GTA.UI.Screen.FadeOut(500);
             Wait(600);
 
@@ -345,7 +348,15 @@ namespace OfflinePvP
             if (!ok)
             {
                 me.IsPositionFrozen = false;
+                me.Position = origin;
+                if (originalCar != null && originalCar.Exists())
+                {
+                    if (originalCar.IsSeatFree(VehicleSeat.Driver)) me.SetIntoVehicle(originalCar, VehicleSeat.Driver);
+                    originalCar.IsPersistent = false;
+                }
+                originalCar = null;
                 GTA.UI.Screen.FadeIn(500);
+                starting = false;
                 Session.MatchActive = false;
                 GTA.UI.Notification.Show("~r~Couldn't build a race route here.~s~ Try a spot with more roads, or another length.");
                 return;
@@ -363,6 +374,7 @@ namespace OfflinePvP
             shownCp = -1;
             int slots = cfg.Opponents + 1;
             int playerSlot = rng.Next(slots);
+            BuildGrid((slots + 1) / 2);
             List<string> taken = new List<string>();
             for (int i = 0; i < slots; i++)
             {
@@ -391,6 +403,7 @@ namespace OfflinePvP
             }
 
             state = State.Countdown;
+            starting = false;
             goAt = Game.GameTime + CountdownMs + 1500;
             GTA.UI.Screen.FadeIn(800);
             string title = cfg.PointToPoint ? "POINT TO POINT" : string.Format("{0} LAP{1}", cfg.Laps, cfg.Laps == 1 ? "" : "S");
@@ -439,6 +452,7 @@ namespace OfflinePvP
             route.Clear();
             Vector3 start = Node(near, out h);
             if (start == Vector3.Zero) return false;
+            startHeading = h;
             for (int attempt = 0; attempt < 3; attempt++)
             {
                 route.Clear();
@@ -465,7 +479,7 @@ namespace OfflinePvP
             for (int i = 1; i < n; i++)
             {
                 double a = a0 + dir * i * Math.PI * 2 / n;
-                Vector3 want = c + new Vector3((float)Math.Cos(a) * r, (float)Math.Sin(a) * r, start.Z);
+                Vector3 want = c + new Vector3((float)Math.Cos(a) * r, (float)Math.Sin(a) * r, 0f);
                 float h;
                 Vector3 p = Node(want, out h);
                 if (p == Vector3.Zero || Flat(p, want) > 120f) continue;
@@ -506,15 +520,53 @@ namespace OfflinePvP
 
         // ------------------------------------------------------------------ grid & vehicles
 
+        readonly List<Vector3> gridRows = new List<Vector3>();
+        readonly List<Vector3> gridFwd = new List<Vector3>();
+
+        /// <summary>
+        /// Grid rows walk backwards from the start along the road (re-snapping to the road and taking its heading every
+        /// row), so the grid bends with the street instead of cutting across blocks.
+        /// </summary>
+        void BuildGrid(int rows)
+        {
+            gridRows.Clear();
+            gridFwd.Clear();
+            Vector3 toFirst = CpPos(0) - route[0];
+            Vector3 fwd = HeadingVector(startHeading);
+            if (Vector3.Dot(fwd, toFirst) < 0f) fwd = -fwd; // road heading points the other way
+            Vector3 at = route[0];
+            for (int row = 0; row < rows; row++)
+            {
+                Vector3 want = at - fwd * 8f;
+                float h;
+                Vector3 node = Node(want, out h);
+                if (node != Vector3.Zero && Flat(node, want) < 6f)
+                {
+                    Vector3 roadFwd = HeadingVector(h);
+                    if (Vector3.Dot(roadFwd, fwd) < 0f) roadFwd = -roadFwd;
+                    fwd = roadFwd;
+                    // Keep the row on the line we're walking, just at the road's height.
+                    want.Z = node.Z;
+                }
+                gridRows.Add(want);
+                gridFwd.Add(fwd);
+                at = want;
+            }
+        }
+
+        static Vector3 HeadingVector(float heading)
+        {
+            double a = heading * Math.PI / 180.0;
+            return new Vector3(-(float)Math.Sin(a), (float)Math.Cos(a), 0f);
+        }
+
         void PlaceOnGrid(Racer r, int slot)
         {
-            Vector3 start = route[0];
-            Vector3 fwd = CpPos(0) - start;
-            fwd.Z = 0f;
-            fwd.Normalize();
-            Vector3 right = new Vector3(fwd.Y, -fwd.X, 0f);
+            if (gridRows.Count <= slot / 2) BuildGrid(slot / 2 + 1);
             int row = slot / 2, col = slot % 2;
-            Vector3 pos = start - fwd * (8f + row * 8f) + right * (col == 0 ? -2.6f : 2.6f);
+            Vector3 fwd = gridFwd[row];
+            Vector3 right = new Vector3(fwd.Y, -fwd.X, 0f);
+            Vector3 pos = gridRows[row] + right * (col == 0 ? -2.6f : 2.6f);
             float heading = (float)(Math.Atan2(fwd.Y, fwd.X) * 180.0 / Math.PI) - 90f;
             r.LastCp = pos;
             r.LastHeading = heading;
@@ -526,8 +578,6 @@ namespace OfflinePvP
             RaceClass cls = RaceConfig.Classes[cfg.Class];
             Model model = Session.LoadModel(rng, cls.Models, m => m.IsVehicle);
             if (model == null) return;
-            float ground = World.GetGroundHeight(new Vector2(pos.X, pos.Y));
-            if (ground != 0f && Math.Abs(ground - pos.Z) < 8f) pos.Z = ground;
             Vehicle car = World.CreateVehicle(model, pos + new Vector3(0f, 0f, 0.5f), heading);
             model.MarkAsNoLongerNeeded();
             if (car == null) return;
@@ -548,12 +598,23 @@ namespace OfflinePvP
             }
             else
             {
-                if (r.Ped == null || !r.Ped.Exists() || r.Ped.IsDead) r.Ped = CreateDriver(car);
+                if (r.Ped == null || !r.Ped.Exists() || r.Ped.IsDead)
+                {
+                    ReleasePed(r.Ped);
+                    r.Ped = CreateDriver(car);
+                }
                 else r.Ped.SetIntoVehicle(car, VehicleSeat.Driver);
                 if (r.Ped == null) return;
                 if (cls.Bikes) r.Ped.GiveHelmet(false, Helmet.RegularMotorcycleHelmet, 0);
             }
             UpdateRacerBlip(r);
+        }
+
+        static void ReleasePed(Ped ped)
+        {
+            if (ped == null || !ped.Exists()) return;
+            ped.IsPersistent = false;
+            ped.MarkAsNoLongerNeeded();
         }
 
         Ped CreateDriver(Vehicle car)
@@ -785,7 +846,11 @@ namespace OfflinePvP
                 r.Car.Repair();
                 Ped driver = r.IsPlayer ? Game.Player.Character : r.Ped;
                 if (driver != null && driver.Exists() && !driver.IsDead && !driver.IsInVehicle(r.Car)) driver.SetIntoVehicle(r.Car, VehicleSeat.Driver);
-                if (!r.IsPlayer && (driver == null || !driver.Exists() || driver.IsDead)) r.Ped = CreateDriver(r.Car);
+                if (!r.IsPlayer && (driver == null || !driver.Exists() || driver.IsDead))
+                {
+                    ReleasePed(r.Ped);
+                    r.Ped = CreateDriver(r.Car);
+                }
             }
             if (r.Car != null && r.Car.Exists())
             {
@@ -860,6 +925,7 @@ namespace OfflinePvP
             ClearCheckpointVisuals();
             Ped me = Game.Player.Character;
             if (me.IsDead) DeathControl.Resurrect(me.Position, me.Heading);
+            me.IsPositionFrozen = false;
             foreach (Racer r in racers)
             {
                 if (r.Blip != null && r.Blip.Exists()) r.Blip.Delete();
@@ -874,6 +940,7 @@ namespace OfflinePvP
             foreach (Racer r in racers)
             {
                 if (r.Car == null || !r.Car.Exists()) continue;
+                r.Car.IsPositionFrozen = false; // aborted during the countdown
                 if (r.IsPlayer && !returning)
                 {
                     r.Car.IsPersistent = false; // keep driving the race car if you stay put

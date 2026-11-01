@@ -420,6 +420,7 @@ namespace OfflinePvP
             int now = Game.GameTime;
             Ped me = Game.Player.Character;
             if (crewGroup == null) SetupGroup();
+            CollectKills();
 
             // Members past the "how many" count go home.
             foreach (CrewMember m in roster.Skip(cfg.PartnersOut)) if (m.Spawned || m.Blip != null) Despawn(m, true);
@@ -453,6 +454,20 @@ namespace OfflinePvP
             DrawOverheads();
         }
 
+        /// <summary>Kills your partners scored on session players (credited by the freemode script).</summary>
+        void CollectKills()
+        {
+            if (Session.CrewKillsPending.Count == 0) return;
+            foreach (KeyValuePair<string, int> kv in Session.CrewKillsPending)
+            {
+                CrewMember m = roster.FirstOrDefault(r => r.Name == kv.Key);
+                if (m != null) m.Kills += kv.Value;
+            }
+            Session.CrewKillsPending.Clear();
+            SaveRoster();
+            RebuildRosterMenu();
+        }
+
         void SetupGroup()
         {
             crewGroup = World.AddRelationshipGroup("SPFM_CREW");
@@ -481,7 +496,13 @@ namespace OfflinePvP
 
             Ped ped = null;
             Vehicle mine = me.CurrentVehicle;
-            if (mine != null && mine.Exists() && FreeSeat(mine) != VehicleSeat.None)
+            bool seat = mine != null && mine.Exists() && FreeSeat(mine) != VehicleSeat.None;
+            if (!seat && (me.IsInFlyingVehicle || me.HeightAboveGround > 8f))
+            {
+                model.MarkAsNoLongerNeeded();
+                return false; // you're in the air with no seat: they meet you when you land
+            }
+            if (seat)
             {
                 ped = mine.CreatePedOnSeat(FreeSeat(mine), model); // straight into your ride
             }
@@ -498,6 +519,7 @@ namespace OfflinePvP
             if (ped == null) return false;
 
             m.Ped = ped;
+            Session.CrewPeds[ped.Handle] = m.Name;
             m.Order = CrewOrder.Follow;
             m.NextThink = Game.GameTime + 300;
             Function.Call(Hash.SET_PED_RANDOM_COMPONENT_VARIATION, ped, 0);
@@ -579,6 +601,7 @@ namespace OfflinePvP
             if (m.Spawned)
             {
                 LeaveGroup(m);
+                Session.CrewPeds.Remove(m.Ped.Handle);
                 m.Ped.Delete();
             }
             m.Ped = null;
@@ -702,6 +725,7 @@ namespace OfflinePvP
                 ? string.Format("~r~{0}~s~ killed your crew mate ~b~{1}~s~.", by.Name, m.Name)
                 : string.Format("Your crew mate ~b~{0}~s~ died.", m.Name));
             LeaveGroup(m);
+            Session.CrewPeds.Remove(m.Ped.Handle);
             m.Ped.IsPersistent = false;
             m.Ped.MarkAsNoLongerNeeded();
             m.Ped = null;
@@ -709,6 +733,7 @@ namespace OfflinePvP
             if (m.Blip != null && m.Blip.Exists()) m.Blip.Delete();
             m.Blip = null;
             SaveRoster();
+            RebuildRosterMenu();
         }
 
         // ------------------------------------------------------------------ HUD

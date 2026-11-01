@@ -540,17 +540,37 @@ namespace OfflinePvP
                             ped.Task.CruiseWithVehicle(ped.CurrentVehicle, 30f, DrivingStyle.AvoidTrafficExtremely);
                             p.Task = AiTask.Cruise;
                         }
+                        else if (p.Task != AiTask.Wander && !ped.IsInVehicle())
+                        {
+                            ped.Task.WanderAround(); // keep moving on foot
+                            p.Task = AiTask.Wander;
+                        }
                         return true;
                     }
                     goal = casePos;
-                    if (ped.Position.DistanceTo(goal) < 3f) { PickUpCase(p); return true; }
+                    // A car can't park on top of it: from a vehicle, close enough counts (you get 4 m).
+                    if (ped.Position.DistanceTo(goal) < (ped.IsInVehicle() ? 8f : 3f)) { PickUpCase(p); return true; }
                     break;
                 default:
                     goal = castle;
                     if (InCastle(ped.Position))
                     {
-                        if (!ped.IsInCombat) ped.Task.FightAgainstHatedTargets(CastleRadius * 2f);
-                        if (ped.IsInVehicle()) ped.Task.LeaveVehicle();
+                        if (ped.IsInVehicle())
+                        {
+                            ped.Task.LeaveVehicle();
+                            return true;
+                        }
+                        // Session players are neutral to each other, so pick a rival on the hill explicitly.
+                        SessionPlayer rival = Players.FirstOrDefault(x => x != p && x.Materialized && x.Ped.Exists() && !x.Ped.IsDead
+                            && InCastle(x.Ped.Position));
+                        if (rival != null)
+                        {
+                            if (!ped.IsInCombatAgainst(rival.Ped)) ped.Task.FightAgainst(rival.Ped);
+                        }
+                        else if (p.Task != AiTask.Fight)
+                        {
+                            ped.Task.GuardCurrentPosition();
+                        }
                         p.Task = AiTask.Fight;
                         return true;
                     }
@@ -707,10 +727,12 @@ namespace OfflinePvP
             return true;
         }
 
+        /// <summary>Ends the whole brawl p is in: both sides, crew mates included.</summary>
         void EndFeud(SessionPlayer p)
         {
             if (p.FeudWith == null) return;
-            foreach (SessionPlayer x in Players.Where(x => x == p || x.FeudWith == p).ToList())
+            SessionPlayer o = p.FeudWith;
+            foreach (SessionPlayer x in Players.Where(x => x == p || x == o || x.FeudWith == p || x.FeudWith == o).ToList())
             {
                 x.FeudWith = null;
                 x.Task = AiTask.None;
@@ -748,7 +770,7 @@ namespace OfflinePvP
             if (inviteFrom != null && now >= inviteUntil) inviteFrom = null;
             if (!cfg.Invites || now < nextInvite) return;
             nextInvite = now + 180000 + rng.Next(180000);
-            if (Session.MatchActive || eventOn || playerDead) return;
+            if (Session.MatchActive || Game.IsMissionActive || eventOn || playerDead) return;
             List<SessionPlayer> friendly = Players.Where(p => !p.Hostile && !p.Dead).ToList();
             if (friendly.Count == 0) return;
             SessionPlayer from = friendly[rng.Next(friendly.Count)];
@@ -767,6 +789,11 @@ namespace OfflinePvP
         void AcceptInvite()
         {
             if (!InvitePending) return;
+            if (Game.IsMissionActive)
+            {
+                GTA.UI.Notification.Show("~r~You can't join a job during a story mission.");
+                return;
+            }
             foreach (SimpleMenu m in new[] { root, sessionMenu, inventoryMenu, profileMenu }) m.Visible = false;
             GTA.UI.Notification.Show(string.Format("Joining ~b~{0}~s~'s {1}...", inviteFrom, Session.JobNames[inviteJob]));
             Session.RequestJob(inviteJob);

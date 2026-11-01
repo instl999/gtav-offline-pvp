@@ -95,6 +95,13 @@ namespace OfflinePvP
         /// <summary>Your crew roster, kept in sync by the crew script. Crew mates fill your side in team jobs.</summary>
         public static readonly List<string> CrewNames = new List<string>();
 
+        /// <summary>Ped handle -> name of crew partners currently spawned (kept by the crew script), so freemode can
+        /// credit their kills.</summary>
+        public static readonly Dictionary<int, string> CrewPeds = new Dictionary<int, string>();
+
+        /// <summary>Kills by crew partners that the crew script hasn't added to its roster stats yet.</summary>
+        public static readonly Dictionary<string, int> CrewKillsPending = new Dictionary<string, int>();
+
         /// <summary>Like Online, people in your session are the ones who join your job.</summary>
         public static string TakeJobName(ICollection<string> taken, Random rng)
         {
@@ -139,11 +146,12 @@ namespace OfflinePvP
     }
 
     /// <summary>
-    /// The player's story-mode weapons, put aside while a job (Gun Game) takes them away, and given back afterwards.
+    /// The player's story-mode weapons and ammo before a job hands out its own (Gun Game). Nothing is removed during
+    /// the job, so attachments, tints and upgrades survive; afterwards the job's extra guns go and ammo is put back.
     /// </summary>
     internal sealed class WeaponStash
     {
-        readonly List<KeyValuePair<WeaponHash, int>> weapons = new List<KeyValuePair<WeaponHash, int>>();
+        readonly Dictionary<WeaponHash, int> owned = new Dictionary<WeaponHash, int>();
         WeaponHash selected = WeaponHash.Unarmed;
 
         public static WeaponStash Save(Ped ped)
@@ -151,18 +159,24 @@ namespace OfflinePvP
             WeaponStash s = new WeaponStash();
             foreach (WeaponHash w in Enum.GetValues(typeof(WeaponHash)))
             {
-                if (w == WeaponHash.Unarmed || !ped.Weapons.HasWeapon(w)) continue;
-                s.weapons.Add(new KeyValuePair<WeaponHash, int>(w, ped.Weapons[w].Ammo));
+                if (w == WeaponHash.Unarmed || s.owned.ContainsKey(w) || !ped.Weapons.HasWeapon(w)) continue;
+                s.owned[w] = ped.Weapons[w].Ammo;
             }
             Weapon cur = ped.Weapons.Current;
             if (cur != null) s.selected = cur.Hash;
             return s;
         }
 
-        public void Restore(Ped ped)
+        public void Restore(Ped ped, IEnumerable<WeaponHash> handedOut)
         {
-            ped.Weapons.RemoveAll();
-            foreach (KeyValuePair<WeaponHash, int> kv in weapons) ped.Weapons.Give(kv.Key, Math.Max(1, kv.Value), false, true);
+            foreach (WeaponHash w in handedOut.Distinct())
+            {
+                if (!owned.ContainsKey(w) && ped.Weapons.HasWeapon(w)) ped.Weapons.Remove(w);
+            }
+            foreach (KeyValuePair<WeaponHash, int> kv in owned)
+            {
+                if (ped.Weapons.HasWeapon(kv.Key)) ped.Weapons[kv.Key].Ammo = kv.Value; // sets, doesn't add
+            }
             if (selected != WeaponHash.Unarmed && ped.Weapons.HasWeapon(selected)) ped.Weapons.Select(selected, true);
         }
     }
