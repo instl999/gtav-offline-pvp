@@ -10,7 +10,8 @@ namespace OfflinePvP
         FreeForAll = 0,
         TeamDeathmatch = 1,
         LastTeamStanding = 2,
-        KingOfTheHill = 3
+        KingOfTheHill = 3,
+        GunGame = 4
     }
 
     internal sealed class ArenaPreset
@@ -107,7 +108,21 @@ namespace OfflinePvP
         public static readonly string[] WeatherIds = { null, "EXTRASUNNY", "CLEAR", "CLOUDS", "SMOG", "FOGGY", "OVERCAST",
             "RAIN", "THUNDER", "CLEARING", "SNOWLIGHT", "XMAS", "HALLOWEEN" };
 
-        public static readonly string[] ModeNames = { "Deathmatch", "Team Deathmatch", "Last Team Standing", "King of the Hill" };
+        public static readonly string[] ModeNames = { "Deathmatch", "Team Deathmatch", "Last Team Standing", "King of the Hill", "Gun Game" };
+
+        /// <summary>
+        /// Gun Game: every kill moves you one weapon up this ladder; a kill with the last one (the knife) wins.
+        /// Being knifed or dying without a killer moves you one down.
+        /// </summary>
+        public static readonly WeaponHash[] GunGameLadder = {
+            WeaponHash.Pistol50, WeaponHash.HeavyPistol, WeaponHash.MicroSMG, WeaponHash.SMG, WeaponHash.CombatPDW,
+            WeaponHash.AssaultSMG, WeaponHash.PumpShotgun, WeaponHash.AssaultShotgun, WeaponHash.AssaultRifle,
+            WeaponHash.CarbineRifle, WeaponHash.SpecialCarbine, WeaponHash.CombatMG, WeaponHash.MarksmanRifle,
+            WeaponHash.HeavySniper, WeaponHash.GrenadeLauncher, WeaponHash.Knife };
+        public static readonly string[] GunGameNames = {
+            "Pistol .50", "Heavy Pistol", "Micro SMG", "SMG", "Combat PDW", "Assault SMG", "Pump Shotgun", "Assault Shotgun",
+            "Assault Rifle", "Carbine Rifle", "Special Carbine", "Combat MG", "Marksman Rifle", "Heavy Sniper",
+            "Grenade Launcher", "Knife" };
 
         public MatchMode Mode = MatchMode.FreeForAll;
         public int RoundsToWin = 3;      // live (Last Team Standing)

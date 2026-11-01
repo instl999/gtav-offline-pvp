@@ -29,7 +29,7 @@ for an item, please open an issue with corrections.
 | Opponent health bars | ✅ | Health and armor bars above name tags |
 | Time of day / weather | ✅ | Restored when the match ends |
 | Up to 16 players (incl. you) | ✅ | Up to 41 here |
-| Team balancing | 🟡 | You set ally and enemy counts by hand |
+| Team balancing | 🟡 | You set ally and enemy counts by hand; your crew fill your side first |
 | Arena bounds | ✅ | Circular; Online uses creator-defined areas |
 | Creator-style hand-placed maps and spawn points | ⬜ | Arenas currently use auto-generated spawn points |
 
@@ -75,9 +75,11 @@ for an item, please open an issue with corrections.
 | Kill yourself | ✅ | Interaction menu |
 | RP, rank, RANK UP | ✅ | Persistent; ranks 100+ use Online's formula, below 100 an approximation |
 | Players join your jobs | ✅ | Deathmatch bots take names from your session |
-| AI players fighting each other | ⬜ | |
-| Players in aircraft, bikes doing stunts, Oppressors | ⬜ | |
-| Invites to jobs from AI players | ⬜ | |
+| AI players fighting each other | ✅ | Feuds between nearby players; crew mates join in |
+| Crews sticking together | ✅ | Attack a crew member and the rest of the crew comes for you |
+| Players in aircraft, bikes doing stunts, Oppressors | ⬜ | Research notes in docs/RESEARCH.md (heli missions; Oppressor Mk II has no AI flight) |
+| Invites to jobs from AI players | ✅ | Phone-style notification; accept with Y or the interaction menu within 30 s |
+| Freemode events | 🟡 | Checkpoints, Hot Property, King of the Castle. Planned: Kill List, Hunt the Beast, Moving Target, Hold the Wheel, Criminal Damage, Challenges |
 | Mental state, bad sport, reporting | ⬜ | |
 
 ## PvP modes
@@ -91,7 +93,20 @@ for an item, please open an issue with corrections.
 | Vehicle Deathmatch | ⬜ | |
 | Capture: GTA, Contend, Hold, Raid | ⬜ | |
 | Adversary modes (Hunting Pack, Slasher, Every Bullet Counts, Come Out to Play, Running Back...) | ⬜ | |
-| Gun Game / arms race | ⬜ | Community favourite |
+| Gun Game / arms race | ✅ | 16-weapon ladder, knife to win, knifed = down a level. (Online has no Gun Game; its closest is Kill Quota) |
+| Kill Quota (team weapon progression) | ⬜ | |
+| Races (land, laps / point to point) | ✅ | Generated routes, grid, countdown, catch-up, hold-F respawn, 30 s DNF timer, results |
+| GTA races (weapons, pickups), Stunt races, Air/Sea races | ⬜ | |
+| Rally, Non-contact, slipstream | ⬜ | |
+
+## Crew and AI partners
+| Online feature | Status | Notes |
+|---|---|---|
+| Friends/crew who play with you | ✅ | Persistent roster of up to 8; 1–4 partners follow you, ride with you, fight for you, respawn |
+| Invite session players to your crew | ✅ | Most accept |
+| Crew mates in your jobs | ✅ | Team jobs and races take crew names first |
+| Partner orders | ✅ | Follow, hold position, attack my target |
+| Partners in their own vehicles / aircraft | 🟡 | Own car when yours is full; no aircraft yet |
 
 ## Online character and economy
 Ideas from CruelMaster's "Online Content in Singleplayer" mod, which covers this side of Online:
@@ -103,7 +118,7 @@ Ideas from CruelMaster's "Online Content in Singleplayer" mod, which covers this
 - Content gated by DLC packs.
 
 ## CEO / organisations
-- Register as CEO and hire AI associates and bodyguards.
+- Register as CEO and hire AI associates and bodyguards (builds on the crew/partner system).
 - Give associates orders: follow, guard, attack my target, hold position.
 - Rival AI CEO organisations with a boss and associates, territory and escalating attacks.
 - Online-style VIP work: Headhunter, Sightseer, crate steal and defend against rival orgs.
@@ -111,6 +126,7 @@ Ideas from CruelMaster's "Online Content in Singleplayer" mod, which covers this
 
 ## Engineering
 - Split the mode logic out of `DeathmatchScript` into a mode interface, so new modes can be plugged in.
+- ~~Cross-platform build~~ (done: `OfflinePvP.csproj` builds with the .NET SDK on macOS/Linux/Windows).
 - A map/spawn editor for hand-placed arenas, saved as XML/JSON.
 - ~~CI build on GitHub Actions~~ (done: every push and PR is compiled against SHVDN 3.6.0 and SHVDN Enhanced,
   and the DLL is binary-checked against both).

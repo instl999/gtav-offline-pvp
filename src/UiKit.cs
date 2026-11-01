@@ -105,9 +105,20 @@ namespace OfflinePvP
             return it;
         }
 
+        /// <summary>True while any script's menu has focus (so other scripts leave Enter/Backspace alone).</summary>
+        public static bool AnyOpen { get { return current != null && current.visible; } }
+
+        /// <summary>Items can be rebuilt while the menu is open: keep the selection in range.</summary>
+        void ClampIndex()
+        {
+            if (index >= Items.Count) index = Math.Max(0, Items.Count - 1);
+            if (first > index) first = index;
+        }
+
         public void Tick()
         {
             if (!Visible) return;
+            ClampIndex();
 
             // Arrow keys / Enter / Backspace double as phone and frontend inputs in vanilla GTA.
             Game.DisableControlThisFrame(Control.Phone);
@@ -163,6 +174,7 @@ namespace OfflinePvP
         public bool HandleKey(Keys key)
         {
             if (!Visible || Items.Count == 0) return false;
+            ClampIndex();
             MenuItem cur = Items[index];
             switch (key)
             {

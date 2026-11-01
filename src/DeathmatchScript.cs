@@ -72,6 +72,9 @@ namespace OfflinePvP
         bool Teams { get { return cfg.Mode == MatchMode.TeamDeathmatch || cfg.Mode == MatchMode.LastTeamStanding; } }
         bool Lts { get { return cfg.Mode == MatchMode.LastTeamStanding; } }
         bool Koth { get { return cfg.Mode == MatchMode.KingOfTheHill; } }
+        bool GunGame { get { return cfg.Mode == MatchMode.GunGame; } }
+        WeaponStash playerWeapons; // Gun Game hands out its own guns; afterwards they go and your ammo is put back
+        bool starting;             // between claiming Session.MatchActive and the match running (Wait()s in between)
         RelationshipGroup[] ffaGroups;
         readonly List<PickupSpot> pickups = new List<PickupSpot>();
         int nextPickupCheck;
@@ -118,8 +121,11 @@ namespace OfflinePvP
             menu.AddAction("Start / end match", "Start a match, or end the current one.",
                 delegate { if (state == State.Idle) startRequested = true; else endRequested = true; menu.Visible = false; }, always)
                 .Value = delegate { return state == State.Idle ? "Start" : (state == State.Running ? "End" : "Finishing"); };
+            menu.AddAction("Races", "Land races against AI drivers: laps or point to point.",
+                delegate { menu.Visible = false; Session.OpenRaceMenu = true; }, idle)
+                .Value = delegate { return ">>"; };
 
-            menu.Add("Mode", "Deathmatch, Team Deathmatch, Last Team Standing (rounds, no respawns) or King of the Hill.",
+            menu.Add("Mode", "Deathmatch, Team Deathmatch, Last Team Standing, King of the Hill or Gun Game (a new gun every kill).",
                 delegate { return DmConfig.ModeNames[(int)cfg.Mode]; },
                 delegate (int d) { cfg.Mode = (MatchMode)Wrap((int)cfg.Mode + d, DmConfig.ModeNames.Length); }, idle);
             menu.Add("Rounds to win", "LIVE. Last Team Standing: rounds a team needs. No respawns within a round.",
@@ -227,7 +233,7 @@ namespace OfflinePvP
                 return;
             }
             if (menu.HandleKey(e.KeyCode)) return;
-            if (state == State.Ended && e.KeyCode == Keys.Enter) endedAt = 0; // skip results screen
+            if (state == State.Ended && e.KeyCode == Keys.Enter && !SimpleMenu.AnyOpen) endedAt = 0; // skip results screen
         }
 
         // ------------------------------------------------------------------ main loop
@@ -238,6 +244,16 @@ namespace OfflinePvP
             {
                 Session.OpenJobsMenu = false;
                 menu.Visible = true;
+            }
+            if (Session.RequestedMatchMode >= 0)
+            {
+                // A job invite was accepted from the interaction menu.
+                if (state == State.Idle && !Session.MatchActive)
+                {
+                    cfg.Mode = (MatchMode)DmConfig.Clamp(Session.RequestedMatchMode, 0, DmConfig.ModeNames.Length - 1);
+                    startRequested = true;
+                }
+                Session.RequestedMatchMode = -1;
             }
             menu.Subtitle = state == State.Idle ? "JOBS" : (state == State.Running ? "MATCH IN PROGRESS" : "MATCH OVER");
             menu.Tick();
@@ -313,6 +329,13 @@ namespace OfflinePvP
                 GTA.UI.Notification.Show("~r~You can't start a deathmatch while dead.");
                 return;
             }
+            if (Session.MatchActive)
+            {
+                GTA.UI.Notification.Show("~r~Finish your current job first.");
+                return;
+            }
+            Session.MatchActive = true; // freemode stands down; claimed before the fade so no other job starts meanwhile
+            starting = true;
 
             GTA.UI.Screen.FadeOut(500);
             Wait(600);
@@ -345,6 +368,7 @@ namespace OfflinePvP
             combatants.Clear();
             feed.Clear();
             nextTeamId = 1;
+            playerWeapons = GunGame ? WeaponStash.Save(me) : null;
             player = new Combatant { Name = "You", IsPlayer = true, Team = 0, Ped = me, Alive = true };
             combatants.Add(player);
 
@@ -354,7 +378,6 @@ namespace OfflinePvP
                 Function.Call(Hash.CLEAR_AREA_OF_COPS, center.X, center.Y, center.Z, radius + 50f, 0);
             }
 
-            Session.MatchActive = true; // freemode session stands down
             DeathControl.Acquire(DeathOwner);
             Function.Call(Hash.SET_MAX_WANTED_LEVEL, 0);
             Game.Player.WantedLevel = 0;
@@ -365,6 +388,7 @@ namespace OfflinePvP
             areaBlip.Alpha = 70;
 
             state = State.Running;
+            starting = false;
             int now = Game.GameTime;
             matchStart = now;
             nextRosterCheck = now;
@@ -387,6 +411,7 @@ namespace OfflinePvP
             string sub;
             if (Lts) sub = string.Format("No respawns. First team to {0} rounds", cfg.RoundsToWin);
             else if (Koth) sub = string.Format("Hold the hill alone. First to {0} points", cfg.HillTarget);
+            else if (GunGame) sub = string.Format("A new gun every kill. {0} levels, finish with the knife", DmConfig.GunGameLadder.Length);
             else sub = cfg.KillLimit > 0 ? string.Format("First to {0} kills", cfg.KillLimit) : "Most kills wins";
             shard.Show("SHOW_SHARD_CENTERED_MP_MESSAGE", title, sub, 4000);
             AddFeed(string.Format("~p~{0}~s~ at {1}", title, DmConfig.Arenas[cfg.Arena].Name));
@@ -468,8 +493,14 @@ namespace OfflinePvP
 
             Ped me = Game.Player.Character;
             if (me.IsDead) ResurrectPlayer(me.Position, me.Heading);
+            me.IsPositionFrozen = false;
             me.IsInvincible = false;
             me.ResetOpacity();
+            if (playerWeapons != null)
+            {
+                playerWeapons.Restore(me, DmConfig.GunGameLadder);
+                playerWeapons = null;
+            }
 
             Game.Player.IgnoredByPolice = false;
             Function.Call(Hash.SET_MAX_WANTED_LEVEL, 5);
@@ -490,7 +521,8 @@ namespace OfflinePvP
 
         void OnAborted(object sender, EventArgs e)
         {
-            if (state != State.Idle) Cleanup(true);
+            if (state != State.Idle || starting) Cleanup(true);
+            starting = false;
         }
 
         // ------------------------------------------------------------------ roster (live bot count)
@@ -518,7 +550,7 @@ namespace OfflinePvP
             {
                 Combatant c = new Combatant
                 {
-                    Name = Session.TakeJobName(TakenNames(), rng) ?? BotNames.Make(rng, TakenNames()),
+                    Name = (allies ? Session.TakeAllyName(TakenNames(), rng) : Session.TakeJobName(TakenNames(), rng)) ?? BotNames.Make(rng, TakenNames()),
                     IsAlly = allies,
                     Team = Teams ? (allies ? 0 : 1) : nextTeamId++,
                 };
@@ -652,9 +684,15 @@ namespace OfflinePvP
             ped.Health = ped.MaxHealth;
             ped.Armor = p.Armor;
 
-            WeaponHash[] set = DmConfig.Loadouts[cfg.Loadout].Weapons;
-            WeaponHash w = set[rng.Next(set.Length)];
-            ped.Weapons.Give(w, 9999, true, true);
+            if (GunGame)
+            {
+                GiveGunGameWeapon(c);
+            }
+            else
+            {
+                WeaponHash[] set = DmConfig.Loadouts[cfg.Loadout].Weapons;
+                ped.Weapons.Give(set[rng.Next(set.Length)], 9999, true, true);
+            }
 
             ApplyStats(c);
             UpdateBlip(c);
@@ -712,7 +750,11 @@ namespace OfflinePvP
             me.IsInvincible = true;
             player.Alive = true;
             player.SpawnProtectUntil = Game.GameTime + SpawnProtectMs;
-            if (cfg.PlayerLoadout)
+            if (GunGame)
+            {
+                GiveGunGameWeapon(player);
+            }
+            else if (cfg.PlayerLoadout)
             {
                 foreach (WeaponHash w in DmConfig.Loadouts[cfg.Loadout].Weapons) me.Weapons.Give(w, 9999, false, true);
                 me.Weapons.Select(DmConfig.Loadouts[cfg.Loadout].Weapons[0], true);
@@ -756,6 +798,7 @@ namespace OfflinePvP
             if (player.Alive) UpdateSpawnProtection(player, now);
 
             Game.DisableControlThisFrame(Control.CharacterWheel);
+            if (GunGame && player.Alive) LockGunGameWeapon(me);
 
             if (player.Alive && me.IsDead)
             {
@@ -924,9 +967,15 @@ namespace OfflinePvP
                 }
                 else
                 {
+                    bool knifed = GunGame && killer.Tier == DmConfig.GunGameLadder.Length - 1;
                     killer.Kills++;
                     killer.Streak++;
                     AddFeed(string.Format("{0} killed {1}", Colored(killer), Colored(victim)));
+                    if (GunGame)
+                    {
+                        if (knifed) Demote(victim, "humiliated");
+                        Promote(killer);
+                    }
                 }
                 if (killer.IsPlayer && !teamKill)
                 {
@@ -938,7 +987,8 @@ namespace OfflinePvP
             {
                 // No other combatant got the kill: fell, blew themselves up or left the arena. Online docks a point for it.
                 penalty = cfg.SuicidePenalty;
-                if (penalty) victim.Kills--;
+                if (penalty && GunGame) Demote(victim, null);
+                else if (penalty) victim.Kills--;
                 string how = killer != victim ? "died" : (victim.IsPlayer ? "killed yourself" : "killed themselves");
                 AddFeed(string.Format("{0} {1}.{2}", Colored(victim), how, penalty ? " ~r~-1~s~" : ""));
             }
@@ -946,7 +996,7 @@ namespace OfflinePvP
             if (victim.IsPlayer)
             {
                 Progression.RecordDeath();
-                string by = killer != null && killer != victim ? "Killed by " + killer.Name : (penalty ? "Suicide: -1 kill" : "");
+                string by = killer != null && killer != victim ? "Killed by " + killer.Name : (penalty ? (GunGame ? "Suicide: down a level" : "Suicide: -1 kill") : "");
                 shard.Show("SHOW_SHARD_WASTED_MP_MESSAGE", "~r~WASTED", by, Lts ? 3000 : cfg.RespawnDelay * 1000);
             }
             else
@@ -999,6 +1049,11 @@ namespace OfflinePvP
             if (Koth)
             {
                 if (combatants.Any(c => c.Points >= cfg.HillTarget)) EndMatch(false);
+                return;
+            }
+            if (GunGame)
+            {
+                if (combatants.Any(c => c.Tier >= DmConfig.GunGameLadder.Length)) EndMatch(false);
                 return;
             }
             if (cfg.KillLimit <= 0) return;
@@ -1080,7 +1135,7 @@ namespace OfflinePvP
             PickupType type;
             int value = 0;
             if (spot.Kind == PickupKind.Health) type = PickupType.Health;
-            else if (spot.Kind == PickupKind.Armor) type = PickupType.Armour;
+            else if (spot.Kind == PickupKind.Armor || GunGame) type = PickupType.Armour; // Gun Game: no free guns
             else
             {
                 type = WeaponPickupFor(DmConfig.Loadouts[cfg.Loadout].Weapons); // follows live loadout changes
@@ -1316,6 +1371,8 @@ namespace OfflinePvP
             }
             string line2;
             if (Koth) line2 = string.Format("Points {0} / {1}   Kills {2}", player.Points, cfg.HillTarget, player.Kills);
+            else if (GunGame) line2 = string.Format("Level {0} / {1}   {2}", Math.Min(player.Tier + 1, DmConfig.GunGameLadder.Length),
+                DmConfig.GunGameLadder.Length, DmConfig.GunGameNames[Math.Min(player.Tier, DmConfig.GunGameNames.Length - 1)]);
             else if (Lts) line2 = string.Format("Round {0}   First to {1}   K {2} D {3}", roundNo, cfg.RoundsToWin, player.Kills, player.Deaths);
             else line2 = string.Format("Kills {0}{1}   Deaths {2}", player.Kills, cfg.KillLimit > 0 ? " / " + cfg.KillLimit : "", player.Deaths);
             Draw.Text(line2, right - w + 8f, y + 38f, 0.36f, Color.White, GTA.UI.Alignment.Left);
@@ -1397,9 +1454,10 @@ namespace OfflinePvP
             Draw.Rect(x, y, w, rowH, Color.FromArgb(220, 0, 0, 0));
             Draw.Text("#", x + 10f, y + 3f, 0.28f, grey, GTA.UI.Alignment.Left);
             Draw.Text("PLAYER", x + 40f, y + 3f, 0.28f, grey, GTA.UI.Alignment.Left);
-            Draw.Text(Koth ? "POINTS" : "KILLS", x + w - 170f, y + 3f, 0.28f, grey, GTA.UI.Alignment.Right);
-            Draw.Text(Koth ? "KILLS" : "DEATHS", x + w - 95f, y + 3f, 0.28f, grey, GTA.UI.Alignment.Right);
-            Draw.Text(Koth ? "DEATHS" : "K/D", x + w - 15f, y + 3f, 0.28f, grey, GTA.UI.Alignment.Right);
+            bool alt = Koth || GunGame; // score column first, then kills and deaths
+            Draw.Text(Koth ? "POINTS" : (GunGame ? "LEVEL" : "KILLS"), x + w - 170f, y + 3f, 0.28f, grey, GTA.UI.Alignment.Right);
+            Draw.Text(alt ? "KILLS" : "DEATHS", x + w - 95f, y + 3f, 0.28f, grey, GTA.UI.Alignment.Right);
+            Draw.Text(alt ? "DEATHS" : "K/D", x + w - 15f, y + 3f, 0.28f, grey, GTA.UI.Alignment.Right);
         }
 
         float DrawRow(Combatant c, int pos, float x, float y, float w, float rowH)
@@ -1410,9 +1468,11 @@ namespace OfflinePvP
             string kd = (c.Deaths == 0 ? (float)c.Kills : (float)c.Kills / c.Deaths).ToString("0.00");
             Draw.Text(pos.ToString(), x + 10f, y + 2f, 0.32f, fg, GTA.UI.Alignment.Left);
             Draw.Text(me ? Game.Player.Name : c.Name, x + 40f, y + 2f, 0.32f, fg, GTA.UI.Alignment.Left);
-            Draw.Text((Koth ? c.Points : c.Kills).ToString(), x + w - 170f, y + 2f, 0.32f, fg, GTA.UI.Alignment.Right);
-            Draw.Text((Koth ? c.Kills : c.Deaths).ToString(), x + w - 95f, y + 2f, 0.32f, fg, GTA.UI.Alignment.Right);
-            Draw.Text(Koth ? c.Deaths.ToString() : kd, x + w - 15f, y + 2f, 0.32f, fg, GTA.UI.Alignment.Right);
+            bool alt = Koth || GunGame;
+            string score = Koth ? c.Points.ToString() : (GunGame ? Math.Min(c.Tier + 1, DmConfig.GunGameLadder.Length).ToString() : c.Kills.ToString());
+            Draw.Text(score, x + w - 170f, y + 2f, 0.32f, fg, GTA.UI.Alignment.Right);
+            Draw.Text((alt ? c.Kills : c.Deaths).ToString(), x + w - 95f, y + 2f, 0.32f, fg, GTA.UI.Alignment.Right);
+            Draw.Text(alt ? c.Deaths.ToString() : kd, x + w - 15f, y + 2f, 0.32f, fg, GTA.UI.Alignment.Right);
             return y + rowH;
         }
 
@@ -1539,6 +1599,59 @@ namespace OfflinePvP
             bot.VisibleToPlayer = Function.Call<bool>(Hash.HAS_ENTITY_CLEAR_LOS_TO_ENTITY, Game.Player.Character, ped, 17);
         }
 
+        // ------------------------------------------------------------------ Gun Game
+
+        void GiveGunGameWeapon(Combatant c)
+        {
+            Ped ped = c.IsPlayer ? Game.Player.Character : c.Ped;
+            if (ped == null || !ped.Exists() || ped.IsDead) return;
+            WeaponHash w = DmConfig.GunGameLadder[Math.Min(c.Tier, DmConfig.GunGameLadder.Length - 1)];
+            if (!c.IsPlayer) ped.Weapons.RemoveAll(); // the player's story weapons stay; LockGunGameWeapon keeps them holstered
+            if (!ped.Weapons.HasWeapon(w) || ped.Weapons[w].Ammo < 500) ped.Weapons.Give(w, 9999, true, true);
+            ped.Weapons.Select(w, true);
+        }
+
+        /// <summary>Gun Game: you may only hold the gun for your level. Weapon selection is blocked and enforced.</summary>
+        void LockGunGameWeapon(Ped me)
+        {
+            foreach (Control c in new[] { Control.SelectWeapon, Control.WeaponWheelNext, Control.WeaponWheelPrev, Control.WeaponWheelUpDown,
+                Control.WeaponWheelLeftRight, Control.SelectNextWeapon, Control.SelectPrevWeapon, Control.NextWeapon, Control.PrevWeapon,
+                Control.SelectWeaponUnarmed, Control.SelectWeaponMelee, Control.SelectWeaponHandgun, Control.SelectWeaponShotgun,
+                Control.SelectWeaponSmg, Control.SelectWeaponAutoRifle, Control.SelectWeaponSniper, Control.SelectWeaponHeavy,
+                Control.SelectWeaponSpecial })
+                Game.DisableControlThisFrame(c);
+            if (me.IsDead) return;
+            WeaponHash w = DmConfig.GunGameLadder[Math.Min(player.Tier, DmConfig.GunGameLadder.Length - 1)];
+            Weapon cur = me.Weapons.Current;
+            if (cur == null || cur.Hash != w)
+            {
+                if (!me.Weapons.HasWeapon(w)) me.Weapons.Give(w, 9999, true, true);
+                me.Weapons.Select(w, true);
+            }
+        }
+
+        void Promote(Combatant c)
+        {
+            c.Tier++;
+            if (c.Tier >= DmConfig.GunGameLadder.Length) return; // finished the ladder: CheckKillLimit ends the match
+            if (c.Alive) GiveGunGameWeapon(c);
+            if (c.IsPlayer)
+            {
+                GTA.UI.Screen.ShowSubtitle(string.Format("~y~Level {0}:~s~ {1}", c.Tier + 1, DmConfig.GunGameNames[c.Tier]), 2000);
+                Audio.PlaySoundFrontend("CHECKPOINT_PERFECT", "HUD_MINI_GAME_SOUNDSET");
+            }
+            else if (c.Tier == DmConfig.GunGameLadder.Length - 1)
+            {
+                AddFeed(string.Format("{0} is on the ~r~knife~s~.", Colored(c)));
+            }
+        }
+
+        void Demote(Combatant c, string how)
+        {
+            if (c.Tier > 0) c.Tier--;
+            if (how != null) AddFeed(string.Format("{0} was {1}: down a level.", Colored(c), how));
+        }
+
         // ------------------------------------------------------------------ helpers
 
         List<Combatant> Ranked()
@@ -1548,10 +1661,11 @@ namespace OfflinePvP
 
         int ScoreOf(Combatant c)
         {
-            return Koth ? c.Points : c.Kills;
+            if (Koth) return c.Points;
+            return GunGame ? c.Tier : c.Kills;
         }
 
-        string ScoreUnit { get { return Koth ? "points" : "kills"; } }
+        string ScoreUnit { get { return Koth ? "points" : (GunGame ? "levels" : "kills"); } }
 
         List<string> TakenNames()
         {

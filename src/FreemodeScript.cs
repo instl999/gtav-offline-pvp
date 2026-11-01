@@ -34,6 +34,15 @@ namespace OfflinePvP
         public AiTask Task;
         public bool VisibleToPlayer;
 
+        // AI-vs-AI feud: fighting another session player, in a feud relationship group.
+        public SessionPlayer FeudWith;
+        public bool FeudSideB;
+        public int FeudUntil;
+
+        // Freemode events: what this player is currently doing for the event (avoids re-tasking every think).
+        public int EventGoal = -1;
+        public float EventWeight = 1f;   // skill when scoring virtually
+
         public bool Materialized { get { return Ped != null; } }
     }
 
@@ -50,8 +59,14 @@ namespace OfflinePvP
         public bool Blips = true;
         public bool NameTags = true;
         public bool Churn = true;
+        public int EventEvery = 1;       // index into EventEveryMinutes
+        public bool Invites = true;
+        public bool Feuds = true;
         public Keys MenuKey = Keys.M;
         public Keys ListKey = Keys.Z;
+        public Keys AcceptKey = Keys.Y;
+
+        public static readonly int[] EventEveryMinutes = { 0, 10, 15, 20 };
 
         public void Load(ScriptSettings s)
         {
@@ -64,9 +79,13 @@ namespace OfflinePvP
             Blips = s.GetValue("Session", "Blips", Blips);
             NameTags = s.GetValue("Session", "NameTags", NameTags);
             Churn = s.GetValue("Session", "PlayersJoinAndLeave", Churn);
+            EventEvery = DmConfig.Clamp(s.GetValue("Session", "EventFrequency", EventEvery), 0, EventEveryMinutes.Length - 1);
+            Invites = s.GetValue("Session", "JobInvites", Invites);
+            Feuds = s.GetValue("Session", "PlayerFeuds", Feuds);
             Keys k;
             if (Enum.TryParse(s.GetValue("Keys", "InteractionMenu", MenuKey.ToString()), true, out k)) MenuKey = k;
             if (Enum.TryParse(s.GetValue("Keys", "PlayerList", ListKey.ToString()), true, out k)) ListKey = k;
+            if (Enum.TryParse(s.GetValue("Keys", "AcceptInvite", AcceptKey.ToString()), true, out k)) AcceptKey = k;
         }
 
         public void Save(ScriptSettings s)
@@ -80,6 +99,10 @@ namespace OfflinePvP
             s.SetValue("Session", "Blips", Blips);
             s.SetValue("Session", "NameTags", NameTags);
             s.SetValue("Session", "PlayersJoinAndLeave", Churn);
+            s.SetValue("Session", "EventFrequency", EventEvery);
+            s.SetValue("Session", "JobInvites", Invites);
+            s.SetValue("Session", "PlayerFeuds", Feuds);
+            s.SetValue("Keys", "AcceptInvite", AcceptKey.ToString());
             s.SetValue("Keys", "InteractionMenu", MenuKey.ToString());
             s.SetValue("Keys", "PlayerList", ListKey.ToString());
             s.Save();
@@ -90,7 +113,7 @@ namespace OfflinePvP
     /// GTA Online freemode in story mode: a session of AI players who roam, drive, grief, carry bounties and
     /// fight back, plus the interaction menu (snacks, armor, passive mode) and Online-style respawning.
     /// </summary>
-    public sealed class FreemodeScript : Script
+    public sealed partial class FreemodeScript : Script
     {
         const string DeathOwner = "freemode";
         const float SpawnDist = 180f, DespawnDist = 280f;
@@ -135,7 +158,7 @@ namespace OfflinePvP
         int nextVirtual, nextStreaming, nextHostility, nextGrief, nextBounty, nextChurn, nextRoster, playerRespawnAt;
         int playerBounty, playerBountyUntil, wantedCalm;
         Vector3 deathPos;
-        RelationshipGroup neutralGroup, hostileGroup;
+        RelationshipGroup neutralGroup, hostileGroup, feudA, feudB;
 
         public FreemodeScript()
         {
@@ -162,13 +185,23 @@ namespace OfflinePvP
                 m.DisabledHelp = "Not available right now.";
             }
 
-            root.AddSubmenu("Online session", "AI players in your world: count, griefers, bounties, respawn.", sessionMenu);
+            root.AddAction("Accept job invite", "Join the job a player just invited you to.", AcceptInvite,
+                delegate { return InvitePending && !Session.MatchActive; })
+                .Value = InviteLabel;
+            root.AddSubmenu("Online session", "AI players in your world: count, griefers, bounties, events, invites.", sessionMenu);
             root.AddSubmenu("Inventory", "Snacks and body armor.", inventoryMenu);
             root.Add("Passive mode", "AI players can't hurt you and you can't hurt them. Griefers back off.",
                 delegate { return passive ? "On" : "Off"; },
                 delegate (int d) { SetPassive(!passive); }, always);
-            root.AddAction("Jobs", "Open the deathmatch / job menu.",
-                delegate { root.Visible = false; Session.OpenJobsMenu = true; }, freeRoam);
+            root.AddAction("Crew & partners", "Your crew: AI friends who play alongside you.",
+                delegate { root.Visible = false; Session.OpenCrewMenu = true; }, always)
+                .Value = delegate { return ">>"; };
+            root.AddAction("Jobs", "Deathmatch, Team Deathmatch, LTS, King of the Hill, Gun Game.",
+                delegate { root.Visible = false; Session.OpenJobsMenu = true; }, freeRoam)
+                .Value = delegate { return ">>"; };
+            root.AddAction("Races", "Land races against AI drivers.",
+                delegate { root.Visible = false; Session.OpenRaceMenu = true; }, freeRoam)
+                .Value = delegate { return ">>"; };
             root.AddSubmenu("Profile", "Rank, RP and stats.", profileMenu);
             root.AddAction("Kill yourself", "Like Online's interaction-menu option.",
                 delegate { root.Visible = false; Game.Player.Character.Kill(); }, freeRoam);
@@ -196,6 +229,17 @@ namespace OfflinePvP
             sessionMenu.Add("Players join and leave", "LIVE. Lobby churn, like a real public session.",
                 delegate { return cfg.Churn ? "On" : "Off"; },
                 delegate (int d) { cfg.Churn = !cfg.Churn; }, always);
+            sessionMenu.Add("Freemode events", "LIVE. Hot Property, Checkpoints, King of the Castle every few minutes.",
+                delegate { int m = FmConfig.EventEveryMinutes[cfg.EventEvery]; return m == 0 ? "Off" : "Every " + m + " min"; },
+                delegate (int d) { cfg.EventEvery = DmConfig.Clamp(cfg.EventEvery + d, 0, FmConfig.EventEveryMinutes.Length - 1); ScheduleNextEvent(Game.GameTime); }, always);
+            sessionMenu.AddAction("Start event now", "Launch a random freemode event.",
+                delegate { sessionMenu.Visible = false; StartRandomEvent(Game.GameTime, true); }, delegate { return running && !EventRunning; });
+            sessionMenu.Add("Job invites", "LIVE. Players invite you to jobs. Accept from this menu or with " + cfg.AcceptKey + ".",
+                delegate { return cfg.Invites ? "On" : "Off"; },
+                delegate (int d) { cfg.Invites = !cfg.Invites; }, always);
+            sessionMenu.Add("Players fight each other", "LIVE. Feuds break out between AI players.",
+                delegate { return cfg.Feuds ? "On" : "Off"; },
+                delegate (int d) { cfg.Feuds = !cfg.Feuds; }, always);
             sessionMenu.Add("Player blips", "LIVE. Show every player on the map.",
                 delegate { return cfg.Blips ? "On" : "Off"; },
                 delegate (int d) { cfg.Blips = !cfg.Blips; }, always);
@@ -238,6 +282,11 @@ namespace OfflinePvP
 
         void OnKeyDown(object sender, KeyEventArgs e)
         {
+            if (e.KeyCode == cfg.AcceptKey && InvitePending && !Session.MatchActive && !AnyMenuOpen)
+            {
+                AcceptInvite();
+                return;
+            }
             if (e.KeyCode == cfg.MenuKey)
             {
                 if (AnyMenuOpen)
@@ -300,6 +349,7 @@ namespace OfflinePvP
             if (on)
             {
                 foreach (SessionPlayer p in Players) SetHostile(p, false, 0);
+                OnEventPlayerGone(null, Game.Player.Character.Position); // passive players can't hold event objectives
                 GTA.UI.Notification.Show("Passive mode ~g~enabled~s~.");
             }
             else
@@ -351,10 +401,13 @@ namespace OfflinePvP
             if (cfg.Bounties && now >= nextBounty) { nextBounty = now + 60000; RollBounties(now); }
             if (cfg.Churn && now >= nextChurn) { nextChurn = now + 60000 + rng.Next(60000); Churn(); }
             UpdateBounties(now);
+            UpdateEvents(now);
+            UpdateInvites(now);
             UpdateMaterialized(now);
             UpdateBlips();
             DrawOverheads();
             DrawBountyHud(now);
+            DrawEventHud(now);
             if (Game.IsKeyPressed(cfg.ListKey)) DrawPlayerList();
         }
 
@@ -374,6 +427,17 @@ namespace OfflinePvP
             nextGrief = now + 45000;
             nextBounty = now + 90000;
             nextChurn = now + 90000;
+            nextFeud = now + 60000;
+            nextInvite = now + 120000 + rng.Next(120000);
+            ScheduleNextEvent(now);
+            feudA = World.AddRelationshipGroup("SPFM_FEUD_A");
+            feudB = World.AddRelationshipGroup("SPFM_FEUD_B");
+            feudA.SetRelationshipBetweenGroups(feudB, Relationship.Hate, true);
+            foreach (RelationshipGroup g in new[] { feudA, feudB })
+            {
+                g.SetRelationshipBetweenGroups(mine, Relationship.Neutral, true);
+                g.SetRelationshipBetweenGroups(neutralGroup, Relationship.Neutral, true);
+            }
             SyncRoster(true);
             ApplyAll();
             GTA.UI.Notification.Show(string.Format("Joined an ~b~Online~s~ session with {0} players.", Players.Count));
@@ -382,6 +446,7 @@ namespace OfflinePvP
         void StopSession(bool announce)
         {
             if (!running) return;
+            EndEvent(true);
             foreach (SessionPlayer p in Players.ToArray()) Remove(p);
             Players.Clear();
             ApplyPlayerImmunity(false);
@@ -395,6 +460,7 @@ namespace OfflinePvP
         /// <summary>A job or story mission owns the player: get every AI player out of the world until it's over.</summary>
         void Suspend()
         {
+            EndEvent(true);
             foreach (SessionPlayer p in Players)
             {
                 Dematerialize(p);
@@ -408,6 +474,8 @@ namespace OfflinePvP
 
         void SyncRoster(bool silent)
         {
+            // Someone who joined your crew plays with you as a partner now; their session copy quietly goes once out of sight.
+            foreach (SessionPlayer c in Players.Where(p => !p.Materialized && Session.CrewNames.Contains(p.Name)).ToList()) Remove(c);
             if (Players.Count < cfg.Players) Join(silent || Players.Count < cfg.Players - 3);
             while (silent && Players.Count < cfg.Players) Join(true);
             if (Players.Count > cfg.Players)
@@ -421,7 +489,7 @@ namespace OfflinePvP
         {
             SessionPlayer p = new SessionPlayer
             {
-                Name = BotNames.Make(rng, Players.Select(x => x.Name).ToList()),
+                Name = BotNames.Make(rng, Players.Select(x => x.Name).Concat(Session.CrewNames).ToList()),
                 Rank = 1 + (int)(Math.Pow(rng.NextDouble(), 2.5) * 650),
                 Crew = rng.Next(100) < 30 ? CrewWords[rng.Next(CrewWords.Length)] : null,
                 Driving = rng.Next(100) < 70,
@@ -440,6 +508,8 @@ namespace OfflinePvP
 
         void Remove(SessionPlayer p)
         {
+            EndFeud(p);
+            OnEventPlayerGone(p, p.Materialized && p.Ped.Exists() ? p.Ped.Position : p.Pos);
             Dematerialize(p);
             DeleteBlip(p);
             Players.Remove(p);
@@ -448,7 +518,7 @@ namespace OfflinePvP
         void Churn()
         {
             if (Players.Count < 2 || rng.Next(100) >= 50) return;
-            List<SessionPlayer> away = Players.Where(p => !p.Materialized && !p.Hostile).ToList();
+            List<SessionPlayer> away = Players.Where(p => !p.Materialized && !p.Hostile && !IsEventKey(p)).ToList();
             if (away.Count == 0) return;
             Leave(away[rng.Next(away.Count)]);
             Join(false);
@@ -490,6 +560,8 @@ namespace OfflinePvP
                     }
                     continue;
                 }
+                Vector3 eventDest = EventDest(p);
+                if (eventDest != Vector3.Zero) p.Dest = eventDest;
                 if (p.Hostile && !passive) p.Dest = me; // a griefer heading your way
                 float speed = p.Hostile ? 35f : (p.Driving ? 20f : 2f);
                 Vector3 to = p.Dest - p.Pos;
@@ -497,6 +569,7 @@ namespace OfflinePvP
                 float len = to.Length();
                 if (len < 30f)
                 {
+                    if (eventDest != Vector3.Zero) continue; // waiting at the event
                     p.Dest = RandomPoi();
                     if (rng.Next(100) < 30) p.Driving = !p.Driving;
                     continue;
@@ -637,7 +710,8 @@ namespace OfflinePvP
         void Apply(SessionPlayer p)
         {
             if (p.Ped == null || !p.Ped.Exists()) return;
-            p.Ped.RelationshipGroup = p.Hostile && !passive ? hostileGroup : neutralGroup;
+            if (p.FeudWith != null && !p.Hostile) p.Ped.RelationshipGroup = p.FeudSideB ? feudB : feudA;
+            else p.Ped.RelationshipGroup = p.Hostile && !passive ? hostileGroup : neutralGroup;
             p.Ped.Accuracy = cfg.Accuracy;
             RelationshipGroup mine = Game.Player.Character.RelationshipGroup;
             Function.Call(Hash.SET_ENTITY_CAN_BE_DAMAGED_BY_RELATIONSHIP_GROUP, p.Ped, !passive, mine.Hash);
@@ -656,6 +730,10 @@ namespace OfflinePvP
             Ped me = Game.Player.Character;
             Function.Call(Hash.SET_ENTITY_CAN_BE_DAMAGED_BY_RELATIONSHIP_GROUP, me, !immune, neutralGroup.Hash);
             Function.Call(Hash.SET_ENTITY_CAN_BE_DAMAGED_BY_RELATIONSHIP_GROUP, me, !immune, hostileGroup.Hash);
+            foreach (RelationshipGroup g in new[] { feudA, feudB })
+            {
+                if ((object)g != null && g.Hash != 0) Function.Call(Hash.SET_ENTITY_CAN_BE_DAMAGED_BY_RELATIONSHIP_GROUP, me, !immune, g.Hash);
+            }
         }
 
         // ------------------------------------------------------------------ AI behaviour
@@ -690,6 +768,13 @@ namespace OfflinePvP
             {
                 Function.Call(Hash.CLEAR_ENTITY_LAST_DAMAGE_ENTITY, ped);
                 SetHostile(p, true, 90000);
+                CallInCrew(p);
+            }
+            p.VisibleToPlayer = Function.Call<bool>(Hash.HAS_ENTITY_CLEAR_LOS_TO_ENTITY, me, ped, 17);
+            if (!(p.Hostile && !passive))
+            {
+                if (ThinkFeud(p)) return;
+                if (EventThink(p, me)) return;
             }
 
             bool hunt = p.Hostile && !passive && !playerDead && !me.IsDead;
@@ -720,7 +805,6 @@ namespace OfflinePvP
                     p.Task = AiTask.Wander;
                 }
             }
-            p.VisibleToPlayer = Function.Call<bool>(Hash.HAS_ENTITY_CLEAR_LOS_TO_ENTITY, me, ped, 17);
         }
 
         void SetHostile(SessionPlayer p, bool hostile, int durationMs)
@@ -738,6 +822,7 @@ namespace OfflinePvP
             {
                 if (p.Hostile && now > p.HostileUntil) SetHostile(p, false, 0);
             }
+            UpdateFeuds(now);
             if (passive || cfg.Griefing == 0 || now < nextGrief) return;
             nextGrief = now + 30000;
             int hostiles = Players.Count(p => p.Hostile);
@@ -755,6 +840,8 @@ namespace OfflinePvP
             Ped ped = p.Ped;
             Ped killer = KillerPed(ped);
             Ped me = Game.Player.Character;
+            OnEventPlayerGone(p, ped.Position);
+            EndFeud(p);
             p.Deaths++;
             p.Dead = true;
             p.RespawnAt = now + 8000 + rng.Next(7000);
@@ -776,7 +863,15 @@ namespace OfflinePvP
             else
             {
                 SessionPlayer other = killer == null ? null : Players.FirstOrDefault(o => o.Ped != null && o.Ped.Handle == killer.Handle);
-                if (other != null)
+                string crewMate;
+                if (other == null && killer != null && Session.CrewPeds.TryGetValue(killer.Handle, out crewMate))
+                {
+                    int had;
+                    Session.CrewKillsPending.TryGetValue(crewMate, out had);
+                    Session.CrewKillsPending[crewMate] = had + 1;
+                    GTA.UI.Notification.Show(string.Format("Your crew mate ~b~{0}~s~ killed ~r~{1}~s~.", crewMate, p.Name));
+                }
+                else if (other != null)
                 {
                     other.Kills++;
                     GTA.UI.Notification.Show(string.Format("~b~{0}~s~ killed ~b~{1}~s~.", other.Name, p.Name));
@@ -823,6 +918,7 @@ namespace OfflinePvP
             {
                 playerDead = true;
                 deathPos = me.Position;
+                OnEventPlayerGone(null, deathPos);
                 playerRespawnAt = now + 4000;
                 Progression.RecordDeath();
                 Ped killer = KillerPed(me);
@@ -920,8 +1016,9 @@ namespace OfflinePvP
                 }
                 p.Blip.Position = pos;
                 bool red = (p.Hostile && !passive) || p.Bounty > 0;
-                p.Blip.Color = red ? BlipColor.Red : BlipColor.White;
-                p.Blip.IsFlashing = p.Bounty > 0;
+                bool key = IsEventKey(p);
+                p.Blip.Color = key ? BlipColor.Purple : (red ? BlipColor.Red : BlipColor.White);
+                p.Blip.IsFlashing = p.Bounty > 0 || key;
             }
         }
 
@@ -968,7 +1065,8 @@ namespace OfflinePvP
             y += rowH;
             foreach (SessionPlayer p in Players.OrderBy(p => p.Name))
             {
-                string status = p.Dead ? "~c~dead" : (p.Bounty > 0 ? string.Format("~g~${0:N0}", p.Bounty) : (p.Hostile && !passive ? "~r~hostile" : ""));
+                string status = p.Dead ? "~c~dead" : (p.Bounty > 0 ? string.Format("~g~${0:N0}", p.Bounty)
+                    : (p.Hostile && !passive ? "~r~hostile" : (p.FeudWith != null ? "~o~fighting" : (Session.CrewNames.Contains(p.Name) ? "~b~crew" : ""))));
                 Row(x, y, w, rowH, p.Rank.ToString(), p.Crew == null ? p.Name : p.Name + "  ~c~[" + p.Crew + "]", status, White, false);
                 y += rowH;
             }

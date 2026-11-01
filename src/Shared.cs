@@ -82,11 +82,48 @@ namespace OfflinePvP
         /// <summary>Set by the interaction menu to ask the jobs script to open its menu.</summary>
         public static bool OpenJobsMenu;
 
+        /// <summary>Set by other menus to open the crew menu / races menu (each script opens its own on its next tick).</summary>
+        public static bool OpenCrewMenu, OpenRaceMenu;
+
+        /// <summary>
+        /// A job invite was accepted: the jobs script starts this mode (a <see cref="MatchMode"/>), or the race script
+        /// starts a race. -1 / false = nothing pending.
+        /// </summary>
+        public static int RequestedMatchMode = -1;
+        public static bool RequestedRace;
+
+        /// <summary>Your crew roster, kept in sync by the crew script. Crew mates fill your side in team jobs.</summary>
+        public static readonly List<string> CrewNames = new List<string>();
+
+        /// <summary>Ped handle -> name of crew partners currently spawned (kept by the crew script), so freemode can
+        /// credit their kills.</summary>
+        public static readonly Dictionary<int, string> CrewPeds = new Dictionary<int, string>();
+
+        /// <summary>Kills by crew partners that the crew script hasn't added to its roster stats yet.</summary>
+        public static readonly Dictionary<string, int> CrewKillsPending = new Dictionary<string, int>();
+
         /// <summary>Like Online, people in your session are the ones who join your job.</summary>
         public static string TakeJobName(ICollection<string> taken, Random rng)
         {
-            List<SessionPlayer> free = Players.Where(p => !taken.Contains(p.Name)).ToList();
+            List<SessionPlayer> free = Players.Where(p => !taken.Contains(p.Name) && !CrewNames.Contains(p.Name)).ToList();
             return free.Count > 0 ? free[rng.Next(free.Count)].Name : null;
+        }
+
+        /// <summary>A teammate's name: your crew first, then anyone in the session.</summary>
+        public static string TakeAllyName(ICollection<string> taken, Random rng)
+        {
+            List<string> crew = CrewNames.Where(n => !taken.Contains(n)).ToList();
+            return crew.Count > 0 ? crew[rng.Next(crew.Count)] : TakeJobName(taken, rng);
+        }
+
+        public static readonly string[] JobNames = { "Deathmatch", "Team Deathmatch", "Last Team Standing", "King of the Hill", "Gun Game", "Race" };
+
+        /// <summary>Starts a job from an invite. Index into <see cref="JobNames"/>; the last one is a race.</summary>
+        public static void RequestJob(int job)
+        {
+            if (MatchActive) return;
+            if (job >= JobNames.Length - 1) RequestedRace = true;
+            else RequestedMatchMode = job;
         }
 
         public static readonly string[] PlayerModels = {
@@ -105,6 +142,42 @@ namespace OfflinePvP
                 if (m.Request(1000)) return m;
             }
             return null;
+        }
+    }
+
+    /// <summary>
+    /// The player's story-mode weapons and ammo before a job hands out its own (Gun Game). Nothing is removed during
+    /// the job, so attachments, tints and upgrades survive; afterwards the job's extra guns go and ammo is put back.
+    /// </summary>
+    internal sealed class WeaponStash
+    {
+        readonly Dictionary<WeaponHash, int> owned = new Dictionary<WeaponHash, int>();
+        WeaponHash selected = WeaponHash.Unarmed;
+
+        public static WeaponStash Save(Ped ped)
+        {
+            WeaponStash s = new WeaponStash();
+            foreach (WeaponHash w in Enum.GetValues(typeof(WeaponHash)))
+            {
+                if (w == WeaponHash.Unarmed || s.owned.ContainsKey(w) || !ped.Weapons.HasWeapon(w)) continue;
+                s.owned[w] = ped.Weapons[w].Ammo;
+            }
+            Weapon cur = ped.Weapons.Current;
+            if (cur != null) s.selected = cur.Hash;
+            return s;
+        }
+
+        public void Restore(Ped ped, IEnumerable<WeaponHash> handedOut)
+        {
+            foreach (WeaponHash w in handedOut.Distinct())
+            {
+                if (!owned.ContainsKey(w) && ped.Weapons.HasWeapon(w)) ped.Weapons.Remove(w);
+            }
+            foreach (KeyValuePair<WeaponHash, int> kv in owned)
+            {
+                if (ped.Weapons.HasWeapon(kv.Key)) ped.Weapons[kv.Key].Ammo = kv.Value; // sets, doesn't add
+            }
+            if (selected != WeaponHash.Unarmed && ped.Weapons.HasWeapon(selected)) ped.Weapons.Select(selected, true);
         }
     }
 
